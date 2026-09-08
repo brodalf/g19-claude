@@ -22,6 +22,7 @@ public sealed class UsageStore
     private readonly Dictionary<string, FileCursor> _cursors = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _seenRequests = new(StringComparer.Ordinal);
     private readonly List<UsageEntry> _entries = new();
+    private readonly List<TurnMarker> _markers = new();
     private readonly object _gate = new();
 
     public UsageStore(int historyDays)
@@ -42,6 +43,11 @@ public sealed class UsageStore
     public IReadOnlyList<UsageEntry> Snapshot()
     {
         lock (_gate) return _entries.ToArray();
+    }
+
+    public IReadOnlyList<TurnMarker> MarkerSnapshot()
+    {
+        lock (_gate) return _markers.ToArray();
     }
 
     public void Refresh()
@@ -131,16 +137,35 @@ public sealed class UsageStore
             using var doc = JsonDocument.Parse(line);
             var root = doc.RootElement;
 
+            if (!root.TryGetProperty("timestamp", out var ts) ||
+                !DateTimeOffset.TryParse(ts.GetString(), out var timestamp)) return;
+
+            timestamp = timestamp.ToUniversalTime();
+
+            var sessionId = root.TryGetProperty("sessionId", out var sid) ? sid.GetString() ?? "" : "";
+            var kind = root.TryGetProperty("type", out var t) ? t.GetString() ?? "" : "";
+
             if (!root.TryGetProperty("message", out var message)) return;
+
+            // Turn state comes from stop_reason: "end_turn" means Claude handed control back,
+            // anything else (typically "tool_use") means it is still working. User entries -
+            // which include tool results - also mean work is in flight. Every other line type
+            // (attachment, system, queue-operation, ...) is bookkeeping and must not move the
+            // state, or the display would flicker between working and done.
+            if (kind is "assistant" or "user")
+            {
+                var stop = message.TryGetProperty("stop_reason", out var sr) ? sr.GetString() : null;
+                var isEndTurn = kind == "assistant" && stop == "end_turn";
+
+                lock (_gate) _markers.Add(new TurnMarker(timestamp, sessionId, isEndTurn));
+            }
+
             if (!message.TryGetProperty("usage", out var usage)) return;
 
             // Every retry of a request repeats its usage block; the request id keeps the totals
             // from double-counting.
             var requestId = root.TryGetProperty("requestId", out var r) ? r.GetString() : null;
             if (requestId is not null && !_seenRequests.Add(requestId)) return;
-
-            if (!root.TryGetProperty("timestamp", out var ts) ||
-                !DateTimeOffset.TryParse(ts.GetString(), out var timestamp)) return;
 
             entry = new UsageEntry(
                 Timestamp: timestamp.ToUniversalTime(),
@@ -167,8 +192,8 @@ public sealed class UsageStore
     {
         lock (_gate)
         {
-            if (_entries.Count == 0) return;
             _entries.RemoveAll(e => e.Timestamp < cutoff);
+            _markers.RemoveAll(m => m.Timestamp < cutoff);
         }
     }
 

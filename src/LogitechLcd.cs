@@ -31,58 +31,21 @@ internal static class LogitechLcd
 
     private const string Dll = "LogitechLcd.dll";
 
-    private static bool _resolverInstalled;
-
     /// <summary>
-    /// Installs the native resolver. Call once before touching any other member.
+    /// Installs the shared native resolver and verifies the DLL is actually reachable, so a
+    /// missing LGS install fails here with a useful message rather than at the first P/Invoke.
     /// </summary>
     public static void Initialize()
     {
-        if (_resolverInstalled) return;
-        NativeLibrary.SetDllImportResolver(typeof(LogitechLcd).Assembly, Resolve);
-        _resolverInstalled = true;
-    }
+        NativeSdk.EnsureResolver();
 
-    private static IntPtr Resolve(string libraryName, System.Reflection.Assembly assembly, DllImportSearchPath? path)
-    {
-        if (!string.Equals(libraryName, Dll, StringComparison.OrdinalIgnoreCase))
-            return IntPtr.Zero;
-
-        foreach (var candidate in CandidatePaths())
-        {
-            if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out var handle))
-                return handle;
-        }
+        var candidates = NativeSdk.CandidatePaths(Dll).ToList();
+        if (candidates.Any(File.Exists)) return;
 
         throw new DllNotFoundException(
             $"{Dll} nicht gefunden. Ist die Logitech Gaming Software installiert? " +
             $"Alternativ den SDK-Ordner ueber die Umgebungsvariable G19_LCD_SDK setzen. " +
-            $"Gesucht in:{Environment.NewLine}  " + string.Join(Environment.NewLine + "  ", CandidatePaths()));
-    }
-
-    private static IEnumerable<string> CandidatePaths()
-    {
-        var arch = Environment.Is64BitProcess ? "x64" : "x86";
-
-        var overridePath = Environment.GetEnvironmentVariable("G19_LCD_SDK");
-        if (!string.IsNullOrWhiteSpace(overridePath))
-        {
-            yield return Path.Combine(overridePath, Dll);
-            yield return Path.Combine(overridePath, arch, Dll);
-        }
-
-        yield return Path.Combine(AppContext.BaseDirectory, Dll);
-
-        foreach (var root in new[]
-                 {
-                     Environment.GetEnvironmentVariable("ProgramW6432"),
-                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                 })
-        {
-            if (string.IsNullOrWhiteSpace(root)) continue;
-            yield return Path.Combine(root, "Logitech Gaming Software", "SDK", "LCD", arch, Dll);
-        }
+            $"Gesucht in:{Environment.NewLine}  " + string.Join(Environment.NewLine + "  ", candidates));
     }
 
     [DllImport(Dll, CharSet = CharSet.Unicode)]

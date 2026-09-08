@@ -24,6 +24,7 @@ public sealed class LcdRenderer : IDisposable
     private static readonly Color Divider = Color.FromArgb(46, 43, 40);
     private static readonly Color Warn = Color.FromArgb(226, 178, 84);
     private static readonly Color Danger = Color.FromArgb(214, 92, 84);
+    private static readonly Color Done = Color.FromArgb(124, 202, 128);
 
     private readonly Bitmap _canvas = new(W, H, PixelFormat.Format32bppArgb);
     private readonly Graphics _g;
@@ -44,10 +45,17 @@ public sealed class LcdRenderer : IDisposable
         _g.PixelOffsetMode = PixelOffsetMode.HighQuality;
     }
 
-    public void Render(Dashboard d, Page page, AppConfig config, ClaudeControl control)
+    public void Render(Dashboard d, Page page, AppConfig config, ClaudeControl control, bool showBanner)
     {
         _g.Clear(Background);
-        DrawHeader(config, control);
+        DrawHeader(d, control);
+
+        if (showBanner && d.HasData && !d.IsWorking)
+        {
+            DrawDoneBanner(d);
+            Push();
+            return;
+        }
 
         if (!d.HasData)
         {
@@ -70,7 +78,11 @@ public sealed class LcdRenderer : IDisposable
 
     // -- chrome --------------------------------------------------------------
 
-    private void DrawHeader(AppConfig config, ClaudeControl control)
+    /// <summary>
+    /// The state badge is the most valuable thing in the header - it answers "can I stop
+    /// watching yet" - so it gets the right-hand slot on every page.
+    /// </summary>
+    private void DrawHeader(Dashboard d, ClaudeControl control)
     {
         using var accent = new SolidBrush(Accent);
         using var secondary = new SolidBrush(TextSecondary);
@@ -79,19 +91,53 @@ public sealed class LcdRenderer : IDisposable
         _g.FillEllipse(accent, 16, 15, 6, 6);
         _g.DrawString("CLAUDE", _fontSmallBold, secondary, 28, 12, _sf);
 
-        var (badge, colour) = config.PauseMode switch
-        {
-            PauseMode.Off => ("ANZEIGE", TextTertiary),
-            PauseMode.Suspend when control.IsSuspended => ("EINGEFROREN", Danger),
-            PauseMode.Suspend => ("OK-FREEZE", TextTertiary),
-            _ => ("OK-STOP", TextTertiary),
-        };
+        var (badge, colour) =
+            control.IsSuspended ? ("EINGEFROREN", Danger)
+            : !d.HasData ? ("--", TextTertiary)
+            : d.IsWorking ? ($"ARBEITET {Clock(d.WorkingFor)}", Accent)
+            : ($"FERTIG {Clock(d.DoneSince)}", Done);
 
         using var badgeBrush = new SolidBrush(colour);
         _g.DrawString(badge, _fontSmallBold, badgeBrush, W - 16 - Measure(badge, _fontSmallBold), 12, _sf);
 
         _g.DrawLine(divider, 16, 30, W - 16, 30);
     }
+
+    /// <summary>
+    /// Full-screen completion banner - readable from across the room, which is the whole point.
+    /// </summary>
+    private void DrawDoneBanner(Dashboard d)
+    {
+        using var done = new SolidBrush(Done);
+        using var primary = new SolidBrush(TextPrimary);
+        using var secondary = new SolidBrush(TextSecondary);
+        using var tertiary = new SolidBrush(TextTertiary);
+
+        using var glow = new SolidBrush(Color.FromArgb(26, Done));
+        _g.FillRectangle(glow, 0, 34, W, H - 34);
+
+        Centered("FERTIG", _fontHuge, done, 62);
+
+        var since = d.DoneSince;
+        Centered(since.TotalSeconds < 60 ? $"vor {since.Seconds}s" : $"vor {Clock(since)}",
+            _fontBody, secondary, 108);
+
+        using var divider = new Pen(Color.FromArgb(60, 90, 62));
+        _g.DrawLine(divider, 40, 138, W - 40, 138);
+
+        if (d.LastTurnDuration > TimeSpan.Zero)
+        {
+            Centered($"Turn dauerte {Clock(d.LastTurnDuration)}", _fontBodyBold, primary, 150);
+            Centered($"{d.LastTurnRequests} Anfragen  -  {Money(d.LastTurnCost)}", _fontSmall, tertiary, 172);
+        }
+
+        Centered("Taste = ausblenden", _fontSmall, tertiary, 210);
+    }
+
+    private static string Clock(TimeSpan value) =>
+        value.TotalHours >= 1
+            ? $"{(int)value.TotalHours}:{value.Minutes:00}:{value.Seconds:00}"
+            : $"{value.Minutes}:{value.Seconds:00}";
 
     private void DrawIdle()
     {

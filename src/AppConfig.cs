@@ -37,6 +37,26 @@ public sealed class AppConfig
     /// <summary>How far back to read transcripts. Two days is plenty for today plus the block.</summary>
     public int HistoryDays { get; set; } = 2;
 
+    /// <summary>Show the full-screen banner when Claude finishes a turn.</summary>
+    public bool NotifyOnDone { get; set; } = true;
+
+    /// <summary>How long the banner stays up before collapsing to the header badge.</summary>
+    public int DoneBannerSeconds { get; set; } = 25;
+
+    /// <summary>
+    /// Also flash the keyboard backlight. This is the part you notice without looking at the
+    /// display - the whole keyboard changes colour.
+    /// </summary>
+    public bool NotifyWithLed { get; set; } = true;
+
+    /// <summary>Flash colour as SDK percentages, 0-100. Default is a clear green.</summary>
+    public int LedRed { get; set; }
+    public int LedGreen { get; set; } = 100;
+    public int LedBlue { get; set; } = 25;
+
+    public int LedFlashSeconds { get; set; } = 4;
+    public int LedFlashIntervalMs { get; set; } = 400;
+
     public static string Path => System.IO.Path.Combine(AppContext.BaseDirectory, "config.json");
 
     private static readonly JsonSerializerOptions Options = new()

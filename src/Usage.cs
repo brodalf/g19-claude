@@ -1,5 +1,14 @@
 namespace G19Claude;
 
+/// <summary>
+/// A point in the transcript that moves the turn state.
+///
+/// <paramref name="IsEndTurn"/> marks an assistant message whose stop_reason was "end_turn" -
+/// Claude handed control back and is waiting. Everything else (a tool_use stop, a user entry,
+/// a tool result) means work is still in flight.
+/// </summary>
+public sealed record TurnMarker(DateTimeOffset Timestamp, string SessionId, bool IsEndTurn);
+
 /// <summary>One assistant response, with the token counts Claude Code recorded for it.</summary>
 public sealed record UsageEntry(
     DateTimeOffset Timestamp,

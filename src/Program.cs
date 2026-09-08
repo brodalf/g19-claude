@@ -54,6 +54,13 @@ internal static class Program
 
         var control = new ClaudeControl(config);
 
+        using var led = new LedNotifier();
+        if (config.NotifyWithLed)
+        {
+            led.TryInitialize();
+            Console.WriteLine($"LED-Signal:    {led.Status}");
+        }
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
@@ -66,7 +73,7 @@ internal static class Program
 
         try
         {
-            RenderLoop(config, control, cts.Token);
+            RenderLoop(config, control, led, cts.Token);
         }
         finally
         {
@@ -91,7 +98,7 @@ internal static class Program
             try
             {
                 store.Refresh();
-                _dashboard = Dashboard.Build(store.Snapshot(), store.ActiveSessionId);
+                _dashboard = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId);
             }
             catch (Exception ex)
             {
@@ -104,7 +111,7 @@ internal static class Program
         }
     }
 
-    private static void RenderLoop(AppConfig config, ClaudeControl control, CancellationToken ct)
+    private static void RenderLoop(AppConfig config, ClaudeControl control, LedNotifier led, CancellationToken ct)
     {
         using var renderer = new LcdRenderer();
 
@@ -113,6 +120,12 @@ internal static class Program
         var page = Page.Session;
         var warnedDisconnected = false;
         var lastAction = "";
+
+        // The first observed state must not count as a transition, or starting the applet
+        // while Claude happens to be idle would fire a completion banner for nothing.
+        var primed = false;
+        var wasWorking = true;
+        var bannerUntil = DateTime.MinValue;
 
         while (!ct.IsCancellationRequested)
         {
@@ -136,20 +149,65 @@ internal static class Program
                 warnedDisconnected = false;
             }
 
-            if (buttons.WasPressed(LogitechLcd.ButtonRight)) page = Next(page, 1);
-            if (buttons.WasPressed(LogitechLcd.ButtonLeft)) page = Next(page, -1);
+            var d = _dashboard;
 
-            if (buttons.WasPressed(LogitechLcd.ButtonOk))
+            if (d.HasData)
             {
-                control.Toggle();
-                if (control.LastAction != lastAction)
+                if (primed && wasWorking && !d.IsWorking)
                 {
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {control.LastAction}");
-                    lastAction = control.LastAction;
+                    bannerUntil = DateTime.UtcNow.AddSeconds(config.DoneBannerSeconds);
+
+                    if (config.NotifyWithLed)
+                        led.Flash(config.LedRed, config.LedGreen, config.LedBlue,
+                            config.LedFlashSeconds * 1000, config.LedFlashIntervalMs);
+
+                    Console.WriteLine(
+                        $"[{DateTime.Now:HH:mm:ss}] Fertig - Turn dauerte " +
+                        $"{d.LastTurnDuration:mm\\:ss}, {d.LastTurnRequests} Anfragen, ${d.LastTurnCost:0.00}");
+                }
+
+                // Work resuming clears the banner immediately - a stale "done" is worse than none.
+                if (d.IsWorking && bannerUntil > DateTime.MinValue)
+                {
+                    bannerUntil = DateTime.MinValue;
+                    led.StopEffects();
+                }
+
+                wasWorking = d.IsWorking;
+                primed = true;
+            }
+
+            var showBanner = config.NotifyOnDone && DateTime.UtcNow < bannerUntil;
+
+            var left = buttons.WasPressed(LogitechLcd.ButtonLeft);
+            var right = buttons.WasPressed(LogitechLcd.ButtonRight);
+            var ok = buttons.WasPressed(LogitechLcd.ButtonOk);
+
+            if (showBanner && (left || right || ok))
+            {
+                // While the banner is up any button dismisses it and does nothing else, so
+                // reaching for it cannot accidentally interrupt Claude.
+                bannerUntil = DateTime.MinValue;
+                led.StopEffects();
+                showBanner = false;
+            }
+            else
+            {
+                if (right) page = Next(page, 1);
+                if (left) page = Next(page, -1);
+
+                if (ok)
+                {
+                    control.Toggle();
+                    if (control.LastAction != lastAction)
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {control.LastAction}");
+                        lastAction = control.LastAction;
+                    }
                 }
             }
 
-            renderer.Render(_dashboard, page, config, control);
+            renderer.Render(d, page, config, control, showBanner);
 
             var remaining = frameTime - (DateTime.UtcNow - frameStart);
             if (remaining > TimeSpan.Zero) Sleep(remaining, ct);
@@ -160,7 +218,7 @@ internal static class Program
     private static void DumpOnce(UsageStore store)
     {
         store.Refresh();
-        var d = Dashboard.Build(store.Snapshot(), store.ActiveSessionId);
+        var d = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId);
 
         if (!d.HasData)
         {
@@ -168,6 +226,9 @@ internal static class Program
             return;
         }
 
+        Console.WriteLine($"Zustand        : {(d.IsWorking ? $"ARBEITET seit {d.WorkingFor:mm\\:ss}" : $"FERTIG seit {d.DoneSince:mm\\:ss}")}");
+        Console.WriteLine($"Letzter Turn   : {d.LastTurnDuration:mm\\:ss}, {d.LastTurnRequests} Anfragen, ${d.LastTurnCost:0.00}");
+        Console.WriteLine();
         Console.WriteLine($"Aktive Session : {d.SessionId}");
         Console.WriteLine($"  Modell       : {d.SessionModel}");
         Console.WriteLine($"  Anfragen     : {d.SessionMessages:N0}");

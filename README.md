@@ -40,6 +40,48 @@ gesetztes Budget als Balken, dazu Startzeit und Countdown bis zum Reset.
 
 **3 — Heute** — Tagessumme und Aufschlüsselung nach Modell.
 
+## Fertig-Meldung
+
+Oben rechts steht auf jeder Seite, ob Claude gerade arbeitet — `ARBEITET 1:23` in
+Terrakotta, `FERTIG 0:42` in Grün. Sobald ein Turn abgeschlossen ist, übernimmt für
+25 Sekunden ein Vollbild-Banner:
+
+```
++------------------------------------------+
+|  * CLAUDE                     FERTIG 0:07 |
+|  ---------------------------------------- |
+|                                           |
+|                FERTIG                     |
+|                 vor 7s                    |
+|        --------------------               |
+|          Turn dauerte 5:13                |
+|        54 Anfragen  -  $9.42              |
+|                                           |
+|            Taste = ausblenden             |
++------------------------------------------+
+```
+
+Gleichzeitig **blinkt die Tastaturbeleuchtung grün** (`LogitechLed.dll`, vier
+Sekunden). Das ist der Teil, den du bemerkst, ohne aufs Display zu schauen. Danach
+wird die vorherige Beleuchtung wiederhergestellt.
+
+Während das Banner steht, blendet **jede** Taste es nur aus und tut sonst nichts —
+so kann das Wegdrücken nicht versehentlich Claude unterbrechen. Nimmt Claude die
+Arbeit wieder auf, verschwindet das Banner sofort.
+
+### Woher der Zustand kommt
+
+Aus dem `stop_reason` der Assistant-Zeilen im Transkript: `end_turn` heißt, Claude hat
+zurückgegeben und wartet; alles andere — typischerweise `tool_use`, oder eine
+`user`-Zeile, unter der auch Tool-Ergebnisse laufen — heißt, es läuft noch. Alle
+übrigen Zeilentypen (`attachment`, `system`, `queue-operation`, …) sind Buchhaltung
+und dürfen den Zustand nicht bewegen, sonst flackert die Anzeige.
+
+Eine Eigenheit war dabei entscheidend: **Claude Code schreibt pro Turn zwei
+`end_turn`-Zeilen** mit verschiedenen uuids und praktisch gleichem Zeitstempel. Ohne
+sie zusammenzufassen ist der „vorherige end_turn" immer der Zwilling des aktuellen,
+und jede gemessene Turn-Dauer kommt als null heraus.
+
 ## Was das Applet *nicht* kann
 
 **Es liest nicht dein echtes Kontingent aus.** Der offizielle Limit-Stand, den
@@ -66,7 +108,15 @@ dient als Vergleichsmaßstab zwischen Sessions.
   "blockBudgetTokens": 0,
   "pauseMode": "Interrupt",
   "processName": "claude",
-  "historyDays": 2
+  "historyDays": 2,
+  "notifyOnDone": true,
+  "doneBannerSeconds": 25,
+  "notifyWithLed": true,
+  "ledRed": 0,
+  "ledGreen": 100,
+  "ledBlue": 25,
+  "ledFlashSeconds": 4,
+  "ledFlashIntervalMs": 400
 }
 ```
 
@@ -76,6 +126,15 @@ dient als Vergleichsmaßstab zwischen Sessions.
 | `pauseMode` | Verhalten der OK-Taste, siehe unten |
 | `processName` | Prozessname ohne `.exe`, auf den die Pause wirkt |
 | `historyDays` | Wie weit zurück Transkripte gelesen werden |
+| `notifyOnDone` | Vollbild-Banner beim Fertigwerden |
+| `doneBannerSeconds` | Wie lange das Banner steht |
+| `notifyWithLed` | Tastaturbeleuchtung blinken lassen |
+| `ledRed` / `ledGreen` / `ledBlue` | Blinkfarbe in **Prozent** (0–100), nicht 0–255 |
+| `ledFlashSeconds` / `ledFlashIntervalMs` | Dauer und Taktung des Blinkens |
+
+Das LED-Signal schlägt weich fehl: fehlt `LogitechLed.dll` oder verweigert das SDK die
+Initialisierung, läuft alles Übrige weiter und nur das Blinken entfällt. Der Status
+steht beim Start auf der Konsole.
 
 ### Die drei Pause-Modi
 
@@ -142,3 +201,10 @@ Transkript auf. Ohne Dedup über diese ID zählt der Verbrauch zu hoch.
 MIT — siehe [LICENSE](LICENSE).
 
 Nicht mit Logitech oder Anthropic verbunden.
+
+### Ein Resolver für beide SDKs
+
+`NativeLibrary.SetDllImportResolver` lässt sich **pro Assembly nur einmal** aufrufen.
+Ein zweiter Aufruf wirft „A resolver is already set for the assembly" — genau der
+Fall, wenn neben dem LCD- auch das LED-SDK dazukommt. Beide Bibliotheken werden
+deshalb über einen gemeinsamen Resolver in `src/NativeSdk.cs` aufgelöst.

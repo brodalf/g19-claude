@@ -36,18 +36,40 @@ public sealed record Dashboard
     public TimeSpan BlockRemaining { get; init; }
     public DateTimeOffset BlockStart { get; init; }
 
+    // Turn state - the "is Claude done yet" signal
+    public bool IsWorking { get; init; } = true;
+    public DateTimeOffset DoneAt { get; init; }
+    public DateTimeOffset WorkingSince { get; init; }
+    public TimeSpan LastTurnDuration { get; init; }
+    public double LastTurnCost { get; init; }
+    public int LastTurnRequests { get; init; }
+
+    public TimeSpan DoneSince => IsWorking || DoneAt == default
+        ? TimeSpan.Zero
+        : Max(DateTimeOffset.UtcNow - DoneAt, TimeSpan.Zero);
+
+    public TimeSpan WorkingFor => !IsWorking || WorkingSince == default
+        ? TimeSpan.Zero
+        : Max(DateTimeOffset.UtcNow - WorkingSince, TimeSpan.Zero);
+
+    private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+
     // Today
     public long TodayTokens { get; init; }
     public double TodayCost { get; init; }
     public int TodayMessages { get; init; }
     public IReadOnlyList<ModelSlice> TodayByModel { get; init; } = Array.Empty<ModelSlice>();
 
-    public static Dashboard Build(IReadOnlyList<UsageEntry> entries, string activeSessionId)
+    public static Dashboard Build(
+        IReadOnlyList<UsageEntry> entries,
+        IReadOnlyList<TurnMarker> markers,
+        string activeSessionId)
     {
         if (entries.Count == 0) return Empty;
 
         var now = DateTimeOffset.UtcNow;
         var session = entries.Where(e => e.SessionId == activeSessionId).ToList();
+        var turn = ResolveTurn(session, markers, activeSessionId);
 
         // "Today" follows the user's local calendar day, not UTC - the display sits on their desk.
         var midnight = new DateTimeOffset(DateTime.Today, DateTimeOffset.Now.Offset).ToUniversalTime();
@@ -86,10 +108,89 @@ public sealed record Dashboard
             BlockRemaining = block?.Remaining(now) ?? TimeSpan.Zero,
             BlockStart = block?.Start ?? default,
 
+            IsWorking = turn.IsWorking,
+            DoneAt = turn.DoneAt,
+            WorkingSince = turn.WorkingSince,
+            LastTurnDuration = turn.Duration,
+            LastTurnCost = turn.Cost,
+            LastTurnRequests = turn.Requests,
+
             TodayTokens = today.Sum(e => e.TotalTokens),
             TodayCost = today.Sum(Pricing.Cost),
             TodayMessages = today.Count,
             TodayByModel = byModel,
         };
+    }
+
+    private sealed record TurnState(
+        bool IsWorking, DateTimeOffset DoneAt, DateTimeOffset WorkingSince,
+        TimeSpan Duration, double Cost, int Requests);
+
+    /// <summary>
+    /// Collapses each run of consecutive end_turn markers into its last entry.
+    ///
+    /// Claude Code writes two end_turn lines per completed turn - distinct uuids, effectively
+    /// the same timestamp. Without collapsing them, the "previous end_turn" is always the twin
+    /// of the current one and every measured turn comes out as zero length. Observed as
+    /// end_turn indices 8,9 / 23,24 / 30,31 / 219,220 in a real transcript.
+    /// </summary>
+    private static List<TurnMarker> Collapse(IEnumerable<TurnMarker> ordered)
+    {
+        var result = new List<TurnMarker>();
+
+        foreach (var marker in ordered)
+        {
+            if (marker.IsEndTurn && result.Count > 0 && result[^1].IsEndTurn)
+                result[^1] = marker;
+            else
+                result.Add(marker);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Derives whether Claude is mid-turn, and what the last completed turn cost.
+    ///
+    /// A turn runs from just after the previous "end_turn" to the next one, so its duration is
+    /// the whole cycle the user waited through - prompt, tool calls and all - not just the
+    /// final message.
+    /// </summary>
+    private static TurnState ResolveTurn(
+        List<UsageEntry> session, IReadOnlyList<TurnMarker> markers, string activeSessionId)
+    {
+        var own = Collapse(markers
+            .Where(m => m.SessionId == activeSessionId)
+            .OrderBy(m => m.Timestamp));
+
+        if (own.Count == 0)
+            return new TurnState(true, default, default, TimeSpan.Zero, 0, 0);
+
+        var lastEnd = own.FindLastIndex(m => m.IsEndTurn);
+        var isWorking = !own[^1].IsEndTurn;
+
+        // Work started with the first marker after the previous completed turn.
+        var workingSince = isWorking
+            ? own[Math.Clamp(lastEnd + 1, 0, own.Count - 1)].Timestamp
+            : default;
+
+        var doneAt = isWorking ? default : own[^1].Timestamp;
+
+        if (lastEnd < 0)
+            return new TurnState(isWorking, doneAt, workingSince, TimeSpan.Zero, 0, 0);
+
+        var previousEnd = lastEnd > 0 ? own.FindLastIndex(lastEnd - 1, m => m.IsEndTurn) : -1;
+        var turnStart = own[Math.Clamp(previousEnd + 1, 0, lastEnd)].Timestamp;
+        var turnEnd = own[lastEnd].Timestamp;
+
+        var inTurn = session.Where(e => e.Timestamp > turnStart && e.Timestamp <= turnEnd).ToList();
+
+        return new TurnState(
+            isWorking,
+            doneAt,
+            workingSince,
+            turnEnd - turnStart,
+            inTurn.Sum(Pricing.Cost),
+            inTurn.Count);
     }
 }
