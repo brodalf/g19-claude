@@ -15,7 +15,7 @@ Token-Zahlen.
 
 ```
 +------------------------------------------+
-|  * CLAUDE                       OK-STOP  |
+|  * CLAUDE                    ARBEITET 1:23 |
 |  ---------------------------------------- |
 |  SESSION                          Opus 5 |
 |                 8.21M                     |
@@ -177,12 +177,14 @@ dotnet run -c Release -- --dump
 |---|---|
 | `src/UsageStore.cs` | Inkrementelles Lesen der JSONL-Transkripte, Dedup, 5-Stunden-Blöcke |
 | `src/Usage.cs` | Datensatz je Anfrage, Preistabelle, Blockmodell |
-| `src/Dashboard.cs` | Aggregation für die drei Seiten |
+| `src/Dashboard.cs` | Aggregation für die drei Seiten, Turn-Zustand |
 | `src/ClaudeControl.cs` | Interrupt bzw. Suspend/Resume |
+| `src/LedNotifier.cs` | Blinken der Tastaturbeleuchtung, scheitert weich |
+| `src/NativeSdk.cs` | Gemeinsamer Resolver für LCD- und LED-DLL |
 | `src/AppConfig.cs` | `config.json` |
-| `src/LcdRenderer.cs` | Zeichnet die Seiten auf 320×240 |
+| `src/LcdRenderer.cs` | Zeichnet die Seiten und das Fertig-Banner auf 320×240 |
 | `src/LogitechLcd.cs` | P/Invoke auf `LogitechLcd.dll` |
-| `src/Program.cs` | Poll- und Render-Schleife |
+| `src/Program.cs` | Poll- und Render-Schleife, Zustandsübergang |
 
 ### Zwei Details, die Arbeit gemacht haben
 
