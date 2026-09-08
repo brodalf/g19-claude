@@ -44,9 +44,18 @@ public sealed class TaskStore
     /// Re-reads only when the directory's timestamp moved, so the common case costs one stat
     /// call rather than opening every task file each second.
     /// </summary>
+    /// <summary>
+    /// Session ids are transcript file names and always look like a uuid. Anything else is
+    /// refused rather than concatenated into a path - the id can arrive from --session, and a
+    /// value containing separators or ".." would step outside the tasks directory.
+    /// </summary>
+    private static bool IsWellFormed(string sessionId) =>
+        sessionId.Length is > 0 and <= 128 &&
+        sessionId.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
+
     public void Refresh(string sessionId)
     {
-        if (string.IsNullOrEmpty(sessionId))
+        if (string.IsNullOrEmpty(sessionId) || !IsWellFormed(sessionId))
         {
             _tasks = Array.Empty<TaskItem>();
             return;

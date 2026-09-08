@@ -99,9 +99,27 @@ public sealed class AppConfig
         return fresh;
     }
 
+    /// <summary>
+    /// Writes through a temporary file and replaces in one step. A direct write interrupted
+    /// part-way leaves truncated JSON behind, and the next start would silently fall back to
+    /// defaults - losing calibrated budgets without saying so.
+    /// </summary>
     public void Save()
     {
-        try { File.WriteAllText(Path, JsonSerializer.Serialize(this, Options)); }
-        catch (IOException) { /* read-only install directory - run without persisting */ }
+        var target = Path;
+        var temporary = target + ".tmp";
+
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(this, Options));
+
+            if (File.Exists(target)) File.Replace(temporary, target, null);
+            else File.Move(temporary, target);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Read-only install directory - keep running, just without persisting.
+            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { /* nothing to do */ }
+        }
     }
 }

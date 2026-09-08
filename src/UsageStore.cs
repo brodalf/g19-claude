@@ -20,7 +20,11 @@ public sealed class UsageStore
     private readonly int _historyDays;
 
     private readonly Dictionary<string, FileCursor> _cursors = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _seenRequests = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Request ids already counted, with when they were seen. A set alone would grow without
+    /// bound in a process meant to run for weeks, so these are pruned with the entries.
+    /// </summary>
+    private readonly Dictionary<string, DateTimeOffset> _seenRequests = new(StringComparer.Ordinal);
     private readonly List<UsageEntry> _entries = new();
     private readonly List<TurnMarker> _markers = new();
     private readonly Dictionary<string, SessionInfo> _sessions = new(StringComparer.Ordinal);
@@ -89,6 +93,10 @@ public sealed class UsageStore
         Prune(cutoff);
     }
 
+    /// <summary>Read at most this much per pass, so a first read of a large transcript does not
+    /// allocate the whole file at once.</summary>
+    private const int MaxChunkBytes = 1 << 20;
+
     private void ReadNew(FileInfo info)
     {
         if (!_cursors.TryGetValue(info.FullName, out var cursor))
@@ -97,14 +105,12 @@ public sealed class UsageStore
             _cursors[info.FullName] = cursor;
         }
 
-        // A shorter file than last time means it was rotated or rewritten - start over.
-        if (info.Length < cursor.Offset)
-        {
-            cursor.Offset = 0;
-            cursor.Partial.Clear();
-        }
+        cursor.LastSeenUtc = DateTime.UtcNow;
 
-        if (info.Length == cursor.Offset) return;
+        // A shorter file than last time means it was rotated or rewritten - start over.
+        if (info.Length < cursor.Offset) cursor.Reset();
+
+        if (info.Length <= cursor.Offset) return;
 
         using var stream = new FileStream(
             info.FullName, FileMode.Open, FileAccess.Read,
@@ -112,30 +118,61 @@ public sealed class UsageStore
 
         stream.Seek(cursor.Offset, SeekOrigin.Begin);
 
-        var buffer = new byte[info.Length - cursor.Offset];
-        var read = stream.Read(buffer, 0, buffer.Length);
-        cursor.Offset += read;
-
-        var text = cursor.Partial + Encoding.UTF8.GetString(buffer, 0, read);
-        cursor.Partial.Clear();
-
         var project = Path.GetFileName(Path.GetDirectoryName(info.FullName)) ?? "";
+        var remaining = info.Length - cursor.Offset;
+
+        var buffer = new byte[(int)Math.Min(remaining, MaxChunkBytes)];
+
+        // A UTF-8 character can span the chunk boundary, and the decoder may hold up to three
+        // bytes of it back; the small slack covers the character it completes on the next pass.
+        var chars = new char[buffer.Length + 4];
+
+        while (remaining > 0)
+        {
+            var read = stream.Read(buffer, 0, (int)Math.Min(remaining, buffer.Length));
+            if (read <= 0) break;
+
+            cursor.Offset += read;
+            remaining -= read;
+
+            // The decoder carries incomplete multi-byte sequences across calls. Decoding each
+            // chunk independently would corrupt every character split by a boundary - which in
+            // these transcripts means umlauts and emoji, and the JSON line then fails to parse
+            // and is dropped without trace.
+            var count = cursor.Decoder.GetChars(buffer, 0, read, chars, 0);
+            if (count > 0) ScanLines(cursor, chars.AsSpan(0, count), project);
+        }
+    }
+
+    private void ScanLines(FileCursor cursor, ReadOnlySpan<char> text, string project)
+    {
         var start = 0;
 
         while (true)
         {
-            var newline = text.IndexOf('\n', start);
+            var newline = text[start..].IndexOf('\n');
             if (newline < 0)
             {
-                // Trailing bytes without a newline are an incomplete line still being written.
-                cursor.Partial.Append(text, start, text.Length - start);
-                break;
+                // Trailing characters without a newline are an incomplete line still being written.
+                cursor.Partial.Append(text[start..]);
+                return;
             }
 
-            var line = text.AsSpan(start, newline - start).TrimEnd('\r');
-            start = newline + 1;
+            var end = start + newline;
+            var line = text[start..end].TrimEnd('\r');
+            start = end + 1;
 
-            if (line.Length > 2) TryAdd(line.ToString(), project);
+            if (cursor.Partial.Length > 0)
+            {
+                cursor.Partial.Append(line);
+                var joined = cursor.Partial.ToString();
+                cursor.Partial.Clear();
+                if (joined.Length > 2) TryAdd(joined, project);
+            }
+            else if (line.Length > 2)
+            {
+                TryAdd(line.ToString(), project);
+            }
         }
     }
 
@@ -178,7 +215,13 @@ public sealed class UsageStore
             // Every retry of a request repeats its usage block; the request id keeps the totals
             // from double-counting.
             var requestId = root.TryGetProperty("requestId", out var r) ? r.GetString() : null;
-            if (requestId is not null && !_seenRequests.Add(requestId)) return;
+            if (requestId is not null)
+            {
+                lock (_gate)
+                {
+                    if (!_seenRequests.TryAdd(requestId, timestamp)) return;
+                }
+            }
 
             entry = new UsageEntry(
                 Timestamp: timestamp.ToUniversalTime(),
@@ -305,7 +348,19 @@ public sealed class UsageStore
         {
             _entries.RemoveAll(e => e.Timestamp < cutoff);
             _markers.RemoveAll(m => m.Timestamp < cutoff);
+
+            foreach (var stale in _seenRequests.Where(p => p.Value < cutoff).Select(p => p.Key).ToList())
+                _seenRequests.Remove(stale);
+
+            foreach (var stale in _sessions.Where(p => p.Value.LastActivity < cutoff).Select(p => p.Key).ToList())
+                _sessions.Remove(stale);
         }
+
+        // Cursors for transcripts that have aged out of the window are dead weight; the file is
+        // no longer enumerated, so the cursor would never be touched again.
+        var unseen = DateTime.UtcNow - TimeSpan.FromMinutes(10);
+        foreach (var stale in _cursors.Where(p => p.Value.LastSeenUtc < unseen).Select(p => p.Key).ToList())
+            _cursors.Remove(stale);
     }
 
     /// <summary>
@@ -350,6 +405,15 @@ public sealed class UsageStore
     private sealed class FileCursor
     {
         public long Offset;
+        public DateTime LastSeenUtc = DateTime.UtcNow;
         public readonly StringBuilder Partial = new();
+        public readonly Decoder Decoder = Encoding.UTF8.GetDecoder();
+
+        public void Reset()
+        {
+            Offset = 0;
+            Partial.Clear();
+            Decoder.Reset();
+        }
     }
 }

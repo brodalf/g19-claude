@@ -34,7 +34,17 @@ public sealed class ClaudeControl
     private readonly AppConfig _config;
     private readonly List<int> _suspended = new();
 
-    public ClaudeControl(AppConfig config) => _config = config;
+    public ClaudeControl(AppConfig config)
+    {
+        _config = config;
+
+        // Suspending Claude and then dying would leave it frozen with no obvious cause and no
+        // way to undo it short of Task Manager. These cover the paths a normal shutdown misses;
+        // a hard kill of this process still cannot be caught, which is one more reason Suspend
+        // is opt-in.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => ResumeOnShutdown();
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => ResumeOnShutdown();
+    }
 
     public bool IsSuspended => _suspended.Count > 0;
 
