@@ -76,7 +76,12 @@ Liegen weniger als sieben Tage Verlauf vor, sagt `--calibrate` das ausdrücklich
 Wochenwert ist dann noch keine volle Woche. Nach ein paar Tagen einfach erneut laufen
 lassen. Beide Werte lassen sich jederzeit von Hand in der `config.json` überschreiben.
 
-**3 — Heute** — Tagessumme und Aufschlüsselung nach Modell.
+**3 — Tasks** — Claude Codes Todo-Liste der laufenden Session: erledigt, in Arbeit,
+offen und blockiert, mit Fortschrittsbalken. Die Liste scrollt automatisch zur ersten
+unerledigten Aufgabe, damit das gerade Laufende immer sichtbar ist. Sessions ohne
+Todo-Liste zeigen das ausdrücklich an.
+
+**4 — Heute** — Tagessumme und Aufschlüsselung nach Modell.
 
 ## Fertig-Meldung
 
@@ -215,7 +220,8 @@ dotnet run -c Release -- --dump
 |---|---|
 | `src/UsageStore.cs` | Inkrementelles Lesen der JSONL-Transkripte, Dedup, 5-Stunden-Blöcke |
 | `src/Usage.cs` | Datensatz je Anfrage, Preistabelle, Blockmodell |
-| `src/Dashboard.cs` | Aggregation für die drei Seiten, Turn-Zustand |
+| `src/Dashboard.cs` | Aggregation für die vier Seiten, Turn-Zustand |
+| `src/TaskStore.cs` | Liest die Todo-Liste aus `~/.claude/tasks/<session>/` |
 | `src/ClaudeControl.cs` | Interrupt bzw. Suspend/Resume |
 | `src/LedNotifier.cs` | Blinken der Tastaturbeleuchtung, scheitert weich |
 | `src/NativeSdk.cs` | Gemeinsamer Resolver für LCD- und LED-DLL |

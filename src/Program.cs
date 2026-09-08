@@ -38,7 +38,7 @@ internal static class Program
 
         if (args.Contains("--dump"))
         {
-            DumpOnce(store, config);
+            DumpOnce(store, config, ArgValue(args, "--session"));
             return 0;
         }
 
@@ -70,10 +70,10 @@ internal static class Program
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-        var poller = Task.Run(() => PollLoop(store, config, cts.Token), cts.Token);
+        var poller = Task.Run(() => PollLoop(store, new TaskStore(), config, cts.Token), cts.Token);
 
         Console.WriteLine("Laeuft. Tasten am Display: links/rechts = Seite, OK = Pause.");
-        Console.WriteLine("Seiten: 1 Session, 2 5-Stunden-Fenster, 3 Heute.");
+        Console.WriteLine("Seiten: 1 Session, 2 Limits, 3 Tasks, 4 Heute.");
         Console.WriteLine("Beenden mit Strg+C.");
         Console.WriteLine();
 
@@ -97,14 +97,16 @@ internal static class Program
         return 0;
     }
 
-    private static void PollLoop(UsageStore store, AppConfig config, CancellationToken ct)
+    private static void PollLoop(UsageStore store, TaskStore tasks, AppConfig config, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 store.Refresh();
-                _dashboard = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId, config);
+                tasks.Refresh(store.ActiveSessionId);
+                _dashboard = Dashboard.Build(
+                    store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId, config, tasks.Tasks);
             }
             catch (Exception ex)
             {
@@ -296,10 +298,17 @@ internal static class Program
     };
 
     /// <summary>Prints the aggregate to the console once - useful without a G19 attached.</summary>
-    private static void DumpOnce(UsageStore store, AppConfig config)
+    private static void DumpOnce(UsageStore store, AppConfig config, string? sessionOverride)
     {
         store.Refresh();
-        var d = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId, config);
+
+        var sessionId = string.IsNullOrWhiteSpace(sessionOverride) ? store.ActiveSessionId : sessionOverride;
+
+        var tasks = new TaskStore();
+        tasks.Refresh(sessionId);
+
+        var d = Dashboard.Build(
+            store.Snapshot(), store.MarkerSnapshot(), sessionId, config, tasks.Tasks);
 
         if (!d.HasData)
         {
@@ -336,6 +345,40 @@ internal static class Program
         Console.WriteLine($"Heute: {d.TodayTokens:N0} Tokens, {d.TodayMessages:N0} Anfragen, ${d.TodayCost:0.00}");
         foreach (var slice in d.TodayByModel)
             Console.WriteLine($"  {slice.Display,-12} {slice.Tokens,14:N0}  ${slice.Cost:0.00}");
+
+        Console.WriteLine();
+        if (d.Tasks.Count == 0)
+        {
+            Console.WriteLine("Tasks: keine Task-Liste in dieser Session");
+        }
+        else
+        {
+            var done = d.Tasks.Count(t => t.State == TaskState.Completed);
+            Console.WriteLine($"Tasks: {done}/{d.Tasks.Count} fertig");
+            foreach (var task in d.Tasks)
+            {
+                var glyph = task.State switch
+                {
+                    TaskState.Completed => "[x]",
+                    TaskState.InProgress => "[>]",
+                    TaskState.Blocked => "[!]",
+                    _ => "[ ]",
+                };
+                Console.WriteLine($"  {glyph} {task.Display}");
+            }
+        }
+    }
+
+    /// <summary>Reads "--flag value" or "--flag=value" out of the argument list.</summary>
+    private static string? ArgValue(string[] args, string flag)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (args[i] == flag && i + 1 < args.Length) return args[i + 1];
+            if (args[i].StartsWith(flag + "=", StringComparison.Ordinal)) return args[i][(flag.Length + 1)..];
+        }
+
+        return null;
     }
 
     private static string Percent(double? fraction, long budget) =>

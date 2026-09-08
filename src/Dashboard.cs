@@ -64,6 +64,9 @@ public sealed record Dashboard
     public double? BlockFraction { get; init; }
     public double? WeeklyFraction { get; init; }
 
+    /// <summary>Claude Code's todo list for the active session, empty when it never used one.</summary>
+    public IReadOnlyList<TaskItem> Tasks { get; init; } = Array.Empty<TaskItem>();
+
     // Today
     public long TodayTokens { get; init; }
     public double TodayCost { get; init; }
@@ -74,7 +77,8 @@ public sealed record Dashboard
         IReadOnlyList<UsageEntry> entries,
         IReadOnlyList<TurnMarker> markers,
         string activeSessionId,
-        AppConfig config)
+        AppConfig config,
+        IReadOnlyList<TaskItem> tasks)
     {
         if (entries.Count == 0) return Empty;
 
@@ -123,6 +127,8 @@ public sealed record Dashboard
             BlockMessages = block?.Entries.Count ?? 0,
             BlockRemaining = block?.Remaining(now) ?? TimeSpan.Zero,
             BlockStart = block?.Start ?? default,
+
+            Tasks = tasks,
 
             WeeklyTokens = weekTokens,
             WeeklyCost = week.Sum(Pricing.Cost),

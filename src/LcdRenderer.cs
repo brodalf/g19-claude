@@ -6,13 +6,13 @@ using System.Runtime.InteropServices;
 
 namespace G19Claude;
 
-public enum Page { Session = 0, Block = 1, Today = 2 }
+public enum Page { Session = 0, Block = 1, Tasks = 2, Today = 3 }
 
 public sealed class LcdRenderer : IDisposable
 {
     private const int W = LogitechLcd.ColorWidth;
     private const int H = LogitechLcd.ColorHeight;
-    public const int PageCount = 3;
+    public const int PageCount = 4;
 
     // Claude's clay/terracotta accent against a warm near-black.
     private static readonly Color Background = Color.FromArgb(255, 15, 14, 13);
@@ -68,6 +68,7 @@ public sealed class LcdRenderer : IDisposable
             {
                 case Page.Session: DrawSession(d); break;
                 case Page.Block: DrawBlock(d, config); break;
+                case Page.Tasks: DrawTasks(d); break;
                 case Page.Today: DrawToday(d); break;
             }
 
@@ -303,7 +304,101 @@ public sealed class LcdRenderer : IDisposable
         _g.FillRectangle(brush, x, y, fill, height);
     }
 
-    // -- page 3: today -------------------------------------------------------
+    // -- page 3: task list ---------------------------------------------------
+
+    private const int TaskRows = 7;
+    private const int TaskRowHeight = 20;
+
+    private void DrawTasks(Dashboard d)
+    {
+        using var primary = new SolidBrush(TextPrimary);
+        using var secondary = new SolidBrush(TextSecondary);
+        using var tertiary = new SolidBrush(TextTertiary);
+
+        _g.DrawString("TASKS", _fontSmallBold, tertiary, 16, 40, _sf);
+
+        if (d.Tasks.Count == 0)
+        {
+            Centered("Keine Task-Liste", _fontBody, secondary, 106);
+            Centered("in dieser Session", _fontSmall, tertiary, 128);
+            return;
+        }
+
+        var done = d.Tasks.Count(t => t.State == TaskState.Completed);
+        var counter = $"{done}/{d.Tasks.Count} fertig";
+        _g.DrawString(counter, _fontSmall, tertiary, W - 16 - Measure(counter, _fontSmall), 40, _sf);
+
+        DrawBar(16, 58, W - 32, 5, done / (double)d.Tasks.Count);
+
+        // Scroll so the work in flight is always on screen: start at the first unfinished task,
+        // and only fall back to the tail once everything is done.
+        var first = d.Tasks.ToList().FindIndex(t => t.State != TaskState.Completed);
+        if (first < 0) first = Math.Max(0, d.Tasks.Count - TaskRows);
+        first = Math.Clamp(first, 0, Math.Max(0, d.Tasks.Count - TaskRows));
+
+        var y = 74;
+        foreach (var task in d.Tasks.Skip(first).Take(TaskRows))
+        {
+            DrawTaskRow(task, y);
+            y += TaskRowHeight;
+        }
+
+        var hidden = d.Tasks.Count - first - Math.Min(TaskRows, d.Tasks.Count - first);
+        if (hidden > 0)
+            _g.DrawString($"+{hidden} weitere", _fontSmall, tertiary, 34, y, _sf);
+    }
+
+    private void DrawTaskRow(TaskItem task, int y)
+    {
+        var colour = task.State switch
+        {
+            TaskState.Completed => Done,
+            TaskState.InProgress => Accent,
+            TaskState.Blocked => Warn,
+            _ => TextTertiary,
+        };
+
+        using var marker = new SolidBrush(colour);
+        using var ring = new Pen(colour);
+
+        switch (task.State)
+        {
+            case TaskState.Completed:
+                _g.FillEllipse(marker, 16, y + 3, 8, 8);
+                break;
+
+            case TaskState.InProgress:
+                // Filled dot inside a ring - the active row should read differently at a glance.
+                _g.DrawEllipse(ring, 14, y + 1, 12, 12);
+                _g.FillEllipse(marker, 17, y + 4, 6, 6);
+                break;
+
+            default:
+                _g.DrawEllipse(ring, 16, y + 3, 8, 8);
+                break;
+        }
+
+        using var text = new SolidBrush(task.State switch
+        {
+            TaskState.Completed => TextTertiary,
+            TaskState.InProgress => TextPrimary,
+            _ => TextSecondary,
+        });
+
+        var font = task.State == TaskState.InProgress ? _fontSmallBold : _fontSmall;
+        Clipped(task.Display, font, text, 34, y, W - 34 - 16);
+    }
+
+    private void Clipped(string text, Font font, Brush brush, int x, int y, int maxWidth)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        _g.SetClip(new Rectangle(x, y - 2, maxWidth, (int)font.Size + 8));
+        _g.DrawString(text, font, brush, x, y, _sf);
+        _g.ResetClip();
+    }
+
+    // -- page 4: today -------------------------------------------------------
 
     private void DrawToday(Dashboard d)
     {
