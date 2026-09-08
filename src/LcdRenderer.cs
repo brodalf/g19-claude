@@ -6,13 +6,13 @@ using System.Runtime.InteropServices;
 
 namespace G19Claude;
 
-public enum Page { Session = 0, Block = 1, Tasks = 2, Today = 3 }
+public enum Page { Session = 0, Block = 1, Tasks = 2, Sessions = 3, Today = 4 }
 
 public sealed class LcdRenderer : IDisposable
 {
     private const int W = LogitechLcd.ColorWidth;
     private const int H = LogitechLcd.ColorHeight;
-    public const int PageCount = 4;
+    public const int PageCount = 5;
 
     // Claude's clay/terracotta accent against a warm near-black.
     private static readonly Color Background = Color.FromArgb(255, 15, 14, 13);
@@ -49,7 +49,7 @@ public sealed class LcdRenderer : IDisposable
     public void Render(Dashboard d, Page page, AppConfig config, ClaudeControl control, bool showBanner)
     {
         _g.Clear(Background);
-        DrawHeader(d, control);
+        DrawHeader(d, control, config);
 
         if (showBanner && d.HasData && !d.IsWorking)
         {
@@ -69,6 +69,7 @@ public sealed class LcdRenderer : IDisposable
                 case Page.Session: DrawSession(d); break;
                 case Page.Block: DrawBlock(d, config); break;
                 case Page.Tasks: DrawTasks(d); break;
+                case Page.Sessions: DrawSessions(d); break;
                 case Page.Today: DrawToday(d); break;
             }
 
@@ -84,7 +85,7 @@ public sealed class LcdRenderer : IDisposable
     /// The state badge is the most valuable thing in the header - it answers "can I stop
     /// watching yet" - so it gets the right-hand slot on every page.
     /// </summary>
-    private void DrawHeader(Dashboard d, ClaudeControl control)
+    private void DrawHeader(Dashboard d, ClaudeControl control, AppConfig config)
     {
         using var accent = new SolidBrush(Accent);
         using var secondary = new SolidBrush(TextSecondary);
@@ -93,10 +94,16 @@ public sealed class LcdRenderer : IDisposable
         _g.FillEllipse(accent, 16, 15, 6, 6);
         _g.DrawString("CLAUDE", _fontSmallBold, secondary, 28, 12, _sf);
 
+        // Waiting long enough turns the badge amber - the completion banner is long gone by
+        // then, and this is what catches you when you walked away.
+        var waitingTooLong = !d.IsWorking &&
+                             d.DoneSince >= TimeSpan.FromMinutes(Math.Max(1, config.IdleWarningMinutes));
+
         var (badge, colour) =
             control.IsSuspended ? ("EINGEFROREN", Danger)
             : !d.HasData ? ("--", TextTertiary)
             : d.IsWorking ? ($"ARBEITET {Clock(d.WorkingFor)}", Accent)
+            : waitingTooLong ? ($"WARTET {Clock(d.DoneSince)}", Warn)
             : ($"FERTIG {Clock(d.DoneSince)}", Done);
 
         using var badgeBrush = new SolidBrush(colour);
@@ -171,30 +178,72 @@ public sealed class LcdRenderer : IDisposable
         using var secondary = new SolidBrush(TextSecondary);
         using var tertiary = new SolidBrush(TextTertiary);
         using var accent = new SolidBrush(Accent);
+        using var divider = new Pen(Divider);
 
         _g.DrawString("SESSION", _fontSmallBold, tertiary, 16, 40, _sf);
         var model = d.SessionModel;
         _g.DrawString(model, _fontSmallBold, accent, W - 16 - Measure(model, _fontSmallBold), 40, _sf);
 
-        Centered(Tokens(d.SessionTokens), _fontHuge, primary, 58);
-        Centered("Tokens gesamt", _fontSmall, tertiary, 100);
-
-        using var divider = new Pen(Divider);
-        _g.DrawLine(divider, 16, 122, W - 16, 122);
-
-        // Cache reads dwarf everything else in a long session, so the split is worth showing.
-        Row(132, "Eingabe", Tokens(d.SessionInput), secondary, primary);
-        Row(150, "Ausgabe", Tokens(d.SessionOutput), secondary, primary);
-        Row(168, "Cache geschrieben", Tokens(d.SessionCacheWrite), secondary, primary);
-        Row(186, "Cache gelesen", Tokens(d.SessionCacheRead), secondary, primary);
-
-        _g.DrawLine(divider, 16, 204, W - 16, 204);
-
-        var rate = $"{d.TokensPerMinute:N0} Tok/min";
-        _g.DrawString(rate, _fontSmall, tertiary, 16, 210, _sf);
+        _g.DrawString(Tokens(d.SessionTokens), _fontBig, primary, 16, 52, _sf);
 
         var cost = Money(d.SessionCost);
-        _g.DrawString(cost, _fontSmallBold, accent, W - 16 - Measure(cost, _fontSmallBold), 210, _sf);
+        _g.DrawString(cost, _fontBodyBold, accent, W - 16 - Measure(cost, _fontBodyBold), 62, _sf);
+
+        // One line beats four rows here: what matters is that cache reads dominate and cost
+        // almost nothing, not the exact split.
+        var cacheShare = d.SessionTokens > 0 ? d.SessionCacheRead * 100.0 / d.SessionTokens : 0;
+        _g.DrawString($"{cacheShare:0}% Cache  -  {d.TokensPerMinute:N0} Tok/min",
+            _fontSmall, tertiary, 16, 88, _sf);
+
+        _g.DrawLine(divider, 16, 106, W - 16, 106);
+
+        // Context utilisation: the number that tells you a compaction is coming.
+        _g.DrawString("KONTEXT", _fontSmallBold, tertiary, 16, 114, _sf);
+        var window = $"{Tokens(d.ContextTokens)} / {Tokens(d.ContextWindow)}";
+        _g.DrawString(window, _fontSmall, secondary, W - 16 - Measure(window, _fontSmall), 114, _sf);
+
+        using var contextBrush = new SolidBrush(d.ContextFraction switch
+        {
+            >= 0.9 => Danger,
+            >= 0.7 => Warn,
+            _ => TextPrimary,
+        });
+
+        _g.DrawString($"{d.ContextFraction * 100:0}%", _fontBig, contextBrush, 16, 128, _sf);
+        DrawBar(16, 164, W - 32, 6, d.ContextFraction);
+
+        _g.DrawLine(divider, 16, 180, W - 16, 180);
+
+        _g.DrawString($"{d.SessionMessages:N0} Anfragen", _fontSmall, secondary, 16, 188, _sf);
+
+        var errors = d.ErrorCount == 0 ? "keine Fehler" : $"{d.ErrorCount} Fehler";
+        using var errorBrush = new SolidBrush(d.ErrorCount == 0 ? TextTertiary : Warn);
+        _g.DrawString(errors, _fontSmallBold, errorBrush, W - 16 - Measure(errors, _fontSmallBold), 188, _sf);
+
+        DrawCurrentTool(d, 208);
+    }
+
+    /// <summary>
+    /// What Claude is doing right now, from the last tool_use block. Only meaningful while a
+    /// turn is running - after end_turn it would just be the last thing it happened to do.
+    /// </summary>
+    private void DrawCurrentTool(Dashboard d, int y)
+    {
+        if (!d.IsWorking || string.IsNullOrEmpty(d.CurrentTool)) return;
+
+        using var accent = new SolidBrush(Accent);
+        using var secondary = new SolidBrush(TextSecondary);
+
+        _g.FillRectangle(accent, 16, y + 3, 3, 10);
+
+        var label = d.CurrentTool;
+        _g.DrawString(label, _fontSmallBold, accent, 25, y, _sf);
+
+        var detail = d.CurrentToolDetail;
+        if (string.IsNullOrEmpty(detail)) return;
+
+        var x = 25 + (int)Measure(label, _fontSmallBold) + 8;
+        Clipped(detail, _fontSmall, secondary, x, y, W - x - 16);
     }
 
     private void Row(int y, string label, string value, Brush labelBrush, Brush valueBrush)
@@ -398,7 +447,83 @@ public sealed class LcdRenderer : IDisposable
         _g.ResetClip();
     }
 
-    // -- page 4: today -------------------------------------------------------
+    // -- page 4: all sessions ------------------------------------------------
+
+    private void DrawSessions(Dashboard d)
+    {
+        using var primary = new SolidBrush(TextPrimary);
+        using var secondary = new SolidBrush(TextSecondary);
+        using var tertiary = new SolidBrush(TextTertiary);
+
+        _g.DrawString("SESSIONS", _fontSmallBold, tertiary, 16, 40, _sf);
+
+        if (d.Sessions.Count == 0)
+        {
+            Centered("Keine Sessions der letzten 12 h", _fontBody, secondary, 108);
+            return;
+        }
+
+        var working = d.Sessions.Count(s => s.IsWorking);
+        var summary = working > 0 ? $"{working} arbeiten" : "alle warten";
+        _g.DrawString(summary, _fontSmall, tertiary, W - 16 - Measure(summary, _fontSmall), 40, _sf);
+
+        var y = 60;
+        foreach (var row in d.Sessions.Take(7))
+        {
+            DrawSessionRow(row, y);
+            y += 23;
+        }
+
+        var hidden = d.Sessions.Count - Math.Min(7, d.Sessions.Count);
+        if (hidden > 0)
+            _g.DrawString($"+{hidden} weitere", _fontSmall, tertiary, 32, y, _sf);
+    }
+
+    private void DrawSessionRow(SessionRow row, int y)
+    {
+        using var primary = new SolidBrush(TextPrimary);
+        using var secondary = new SolidBrush(TextSecondary);
+        using var tertiary = new SolidBrush(TextTertiary);
+
+        var state = row.IsWorking ? Accent : row.Idle >= TimeSpan.FromMinutes(30) ? TextTertiary : Done;
+
+        using var dot = new SolidBrush(state);
+        _g.FillEllipse(dot, 16, y + 3, 8, 8);
+
+        // The session this applet is tracking gets a subtle backing so it is findable.
+        if (row.IsActive)
+        {
+            using var highlight = new SolidBrush(Color.FromArgb(28, Accent));
+            _g.FillRectangle(highlight, 12, y - 2, W - 24, 19);
+        }
+
+        Clipped(row.Project, row.IsActive ? _fontSmallBold : _fontSmall, primary, 32, y, 104);
+
+        var status = row.IsWorking ? "arbeitet" : $"wartet {Compact(row.Idle)}";
+        using var statusBrush = new SolidBrush(row.IsWorking ? Accent : TextSecondary);
+        _g.DrawString(status, _fontSmall, statusBrush, 144, y, _sf);
+
+        if (row.ErrorCount > 0)
+        {
+            var errors = $"{row.ErrorCount}!";
+            using var warn = new SolidBrush(Warn);
+            _g.DrawString(errors, _fontSmallBold, warn, 224, y, _sf);
+        }
+
+        var context = $"{row.ContextFraction * 100:0}%";
+        using var contextBrush = new SolidBrush(row.ContextFraction >= 0.8 ? Warn : TextTertiary);
+        _g.DrawString(context, _fontSmall, contextBrush, W - 16 - Measure(context, _fontSmall), y, _sf);
+    }
+
+    /// <summary>Short duration for tight rows: 45s, 12m, 3h.</summary>
+    private static string Compact(TimeSpan value) => value.TotalMinutes switch
+    {
+        < 1 => $"{value.Seconds}s",
+        < 60 => $"{(int)value.TotalMinutes}m",
+        _ => $"{(int)value.TotalHours}h",
+    };
+
+    // -- page 5: today -------------------------------------------------------
 
     private void DrawToday(Dashboard d)
     {

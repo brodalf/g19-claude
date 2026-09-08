@@ -81,7 +81,36 @@ offen und blockiert, mit Fortschrittsbalken. Die Liste scrollt automatisch zur e
 unerledigten Aufgabe, damit das gerade Laufende immer sichtbar ist. Sessions ohne
 Todo-Liste zeigen das ausdrücklich an.
 
-**4 — Heute** — Tagessumme und Aufschlüsselung nach Modell.
+**4 — Sessions** — alle Claude-Sessions der letzten 12 Stunden, arbeitende zuerst,
+danach die am längsten wartenden. Je Zeile Projekt, Zustand (`arbeitet` /
+`wartet 12m`), Kontextauslastung und Fehlerzahl; die vom Applet beobachtete Session ist
+hinterlegt. Bei parallelem Arbeiten in mehreren Fenstern die nützlichste Seite.
+
+**5 — Heute** — Tagessumme und Aufschlüsselung nach Modell.
+
+## Kontext, Werkzeug, Fehler
+
+Seite 1 zeigt drei Werte, die nirgends sonst sichtbar sind:
+
+**Kontextauslastung.** Die Summe aus `input_tokens`, `cache_read_input_tokens` und
+`cache_creation_input_tokens` der letzten Anfrage ist genau das, was das Kontextfenster
+belegt. Als Prozent des Fensters (1 M bei Opus/Sonnet/Fable, 200 k bei Haiku 4.5) siehst
+du eine bevorstehende Kompaktierung, **bevor** sie passiert. Ab 70 % gelb, ab 90 % rot.
+
+**Aktuelles Werkzeug.** Der letzte `tool_use`-Block nennt Werkzeug und die Beschreibung,
+die Claude für den Aufruf angegeben hat — etwa `PowerShell – Build the applet`. Das
+steht nur während eines laufenden Turns; nach `end_turn` wäre es nur noch das zuletzt
+zufällig benutzte Werkzeug.
+
+**Fehlerzähler.** Tool-Ergebnisse mit `is_error: true`. Steigt die Zahl schnell, hängt
+sich eine Session gerade an etwas fest.
+
+## Wartewarnung
+
+Wartet Claude länger als `idleWarningMinutes` (Standard 5) auf dich, wechselt das
+Kopf-Badge von grünem `FERTIG` auf gelbes `WARTET 12:34`. Das ist die Umkehrung des
+Fertig-Signals: das Banner ist nach 25 Sekunden weg, aber wenn du weggegangen bist,
+sagt dir die Farbe beim Zurückkommen sofort, dass dort etwas auf dich wartet.
 
 ## Fertig-Meldung
 
@@ -170,6 +199,7 @@ dient als Vergleichsmaßstab zwischen Sessions.
 | `processName` | Prozessname ohne `.exe`, auf den die Pause wirkt |
 | `historyDays` | Wie weit zurück Transkripte gelesen werden |
 | `notifyOnDone` | Vollbild-Banner beim Fertigwerden |
+| `idleWarningMinutes` | Ab wann das Kopf-Badge auf gelbes WARTET wechselt |
 | `doneBannerSeconds` | Wie lange das Banner steht |
 | `notifyWithLed` | Tastaturbeleuchtung blinken lassen |
 | `ledRed` / `ledGreen` / `ledBlue` | Blinkfarbe in **Prozent** (0–100), nicht 0–255 |
@@ -222,6 +252,7 @@ dotnet run -c Release -- --dump
 | `src/Usage.cs` | Datensatz je Anfrage, Preistabelle, Blockmodell |
 | `src/Dashboard.cs` | Aggregation für die vier Seiten, Turn-Zustand |
 | `src/TaskStore.cs` | Liest die Todo-Liste aus `~/.claude/tasks/<session>/` |
+| `src/Usage.cs` | Preise, Kontextfenster je Modell, Session-Zustand |
 | `src/ClaudeControl.cs` | Interrupt bzw. Suspend/Resume |
 | `src/LedNotifier.cs` | Blinken der Tastaturbeleuchtung, scheitert weich |
 | `src/NativeSdk.cs` | Gemeinsamer Resolver für LCD- und LED-DLL |

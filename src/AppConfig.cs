@@ -50,6 +50,13 @@ public sealed class AppConfig
     /// <summary>Show the full-screen banner when Claude finishes a turn.</summary>
     public bool NotifyOnDone { get; set; } = true;
 
+    /// <summary>
+    /// After this many minutes of Claude waiting on you, the header badge turns amber. The
+    /// inverse of the completion signal: it catches the case where you walked away and the
+    /// banner has long since timed out.
+    /// </summary>
+    public int IdleWarningMinutes { get; set; } = 5;
+
     /// <summary>How long the banner stays up before collapsing to the header badge.</summary>
     public int DoneBannerSeconds { get; set; } = 25;
 

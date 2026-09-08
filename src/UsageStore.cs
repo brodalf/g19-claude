@@ -23,6 +23,7 @@ public sealed class UsageStore
     private readonly HashSet<string> _seenRequests = new(StringComparer.Ordinal);
     private readonly List<UsageEntry> _entries = new();
     private readonly List<TurnMarker> _markers = new();
+    private readonly Dictionary<string, SessionInfo> _sessions = new(StringComparer.Ordinal);
     private readonly object _gate = new();
 
     public UsageStore(int historyDays)
@@ -48,6 +49,16 @@ public sealed class UsageStore
     public IReadOnlyList<TurnMarker> MarkerSnapshot()
     {
         lock (_gate) return _markers.ToArray();
+    }
+
+    public IReadOnlyList<SessionInfo> SessionSnapshot()
+    {
+        lock (_gate) return _sessions.Values.ToArray();
+    }
+
+    public SessionInfo? Session(string sessionId)
+    {
+        lock (_gate) return _sessions.GetValueOrDefault(sessionId);
     }
 
     public void Refresh()
@@ -158,6 +169,8 @@ public sealed class UsageStore
                 var isEndTurn = kind == "assistant" && stop == "end_turn";
 
                 lock (_gate) _markers.Add(new TurnMarker(timestamp, sessionId, isEndTurn));
+
+                TrackSession(root, message, kind, sessionId, project, timestamp);
             }
 
             if (!message.TryGetProperty("usage", out var usage)) return;
@@ -183,6 +196,104 @@ public sealed class UsageStore
         }
 
         lock (_gate) _entries.Add(entry);
+    }
+
+    /// <summary>
+    /// Accumulates the per-session live state: how full the context is, which tool Claude last
+    /// reached for, and how many tool results came back as errors.
+    ///
+    /// Each transcript line is parsed exactly once - files are read incrementally by offset -
+    /// so the error tally can simply be incremented here without needing its own de-duplication.
+    /// </summary>
+    private void TrackSession(
+        JsonElement root, JsonElement message, string kind,
+        string sessionId, string project, DateTimeOffset timestamp)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return;
+
+        lock (_gate)
+        {
+            var info = _sessions.GetValueOrDefault(sessionId)
+                       ?? new SessionInfo { SessionId = sessionId };
+
+            var cwd = root.TryGetProperty("cwd", out var c) ? c.GetString() : null;
+
+            info = info with
+            {
+                LastActivity = timestamp,
+                Project = string.IsNullOrWhiteSpace(cwd)
+                    ? (string.IsNullOrEmpty(info.Project) ? project : info.Project)
+                    : Path.GetFileName(cwd.TrimEnd('\\', '/')),
+            };
+
+            if (kind == "assistant")
+            {
+                if (message.TryGetProperty("model", out var m) && m.GetString() is { Length: > 0 } model)
+                    info = info with { LastModel = model };
+
+                if (message.TryGetProperty("usage", out var usage))
+                {
+                    info = info with
+                    {
+                        ContextTokens = Long(usage, "input_tokens")
+                                        + Long(usage, "cache_read_input_tokens")
+                                        + Long(usage, "cache_creation_input_tokens"),
+                    };
+                }
+
+                if (FindToolUse(message) is { } tool)
+                    info = info with { LastTool = tool.Name, LastToolDetail = tool.Detail };
+            }
+            else if (kind == "user")
+            {
+                info = info with { ErrorCount = info.ErrorCount + CountErrors(message) };
+            }
+
+            _sessions[sessionId] = info;
+        }
+    }
+
+    private static (string Name, string Detail)? FindToolUse(JsonElement message)
+    {
+        if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            return null;
+
+        // The last tool_use block in the message is the most recent thing Claude asked for.
+        (string, string)? found = null;
+
+        foreach (var block in content.EnumerateArray())
+        {
+            if (!block.TryGetProperty("type", out var t) || t.GetString() != "tool_use") continue;
+
+            var name = block.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+            var detail = "";
+
+            if (block.TryGetProperty("input", out var input) && input.ValueKind == JsonValueKind.Object &&
+                input.TryGetProperty("description", out var d))
+            {
+                detail = d.GetString() ?? "";
+            }
+
+            found = (name, detail);
+        }
+
+        return found;
+    }
+
+    private static int CountErrors(JsonElement message)
+    {
+        if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array)
+            return 0;
+
+        var errors = 0;
+
+        foreach (var block in content.EnumerateArray())
+        {
+            if (!block.TryGetProperty("type", out var t) || t.GetString() != "tool_result") continue;
+            if (block.TryGetProperty("is_error", out var e) && e.ValueKind == JsonValueKind.True) errors++;
+        }
+
+        return errors;
     }
 
     private static long Long(JsonElement obj, string name) =>

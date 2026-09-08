@@ -73,7 +73,7 @@ internal static class Program
         var poller = Task.Run(() => PollLoop(store, new TaskStore(), config, cts.Token), cts.Token);
 
         Console.WriteLine("Laeuft. Tasten am Display: links/rechts = Seite, OK = Pause.");
-        Console.WriteLine("Seiten: 1 Session, 2 Limits, 3 Tasks, 4 Heute.");
+        Console.WriteLine("Seiten: 1 Session, 2 Limits, 3 Tasks, 4 Sessions, 5 Heute.");
         Console.WriteLine("Beenden mit Strg+C.");
         Console.WriteLine();
 
@@ -106,7 +106,7 @@ internal static class Program
                 store.Refresh();
                 tasks.Refresh(store.ActiveSessionId);
                 _dashboard = Dashboard.Build(
-                    store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId, config, tasks.Tasks);
+                    store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId, config, tasks.Tasks, store.SessionSnapshot());
             }
             catch (Exception ex)
             {
@@ -308,7 +308,7 @@ internal static class Program
         tasks.Refresh(sessionId);
 
         var d = Dashboard.Build(
-            store.Snapshot(), store.MarkerSnapshot(), sessionId, config, tasks.Tasks);
+            store.Snapshot(), store.MarkerSnapshot(), sessionId, config, tasks.Tasks, store.SessionSnapshot());
 
         if (!d.HasData)
         {
@@ -328,6 +328,10 @@ internal static class Program
         Console.WriteLine($"  Cache Read   : {d.SessionCacheRead:N0}");
         Console.WriteLine($"  Gesamt       : {d.SessionTokens:N0}");
         Console.WriteLine($"  API-Aequiv.  : ${d.SessionCost:0.00}");
+        Console.WriteLine($"  Kontext      : {d.ContextTokens:N0} / {d.ContextWindow:N0}  = {d.ContextFraction * 100:0}%");
+        Console.WriteLine($"  Fehler       : {d.ErrorCount}");
+        if (!string.IsNullOrEmpty(d.CurrentTool))
+            Console.WriteLine($"  Werkzeug     : {d.CurrentTool} - {d.CurrentToolDetail}");
         Console.WriteLine();
         Console.WriteLine($"5-Stunden-Fenster: {(d.HasBlock ? "aktiv" : "keines")}");
         if (d.HasBlock)
@@ -345,6 +349,15 @@ internal static class Program
         Console.WriteLine($"Heute: {d.TodayTokens:N0} Tokens, {d.TodayMessages:N0} Anfragen, ${d.TodayCost:0.00}");
         foreach (var slice in d.TodayByModel)
             Console.WriteLine($"  {slice.Display,-12} {slice.Tokens,14:N0}  ${slice.Cost:0.00}");
+
+        Console.WriteLine();
+        Console.WriteLine($"Sessions der letzten 12 h: {d.Sessions.Count}");
+        foreach (var s in d.Sessions)
+        {
+            var state = s.IsWorking ? "arbeitet" : $"wartet {s.Idle:hh\\:mm\\:ss}";
+            var marker = s.IsActive ? "*" : " ";
+            Console.WriteLine($"  {marker} {s.Project,-22} {state,-18} ctx {s.ContextFraction * 100,3:0}%  {s.ErrorCount} Fehler");
+        }
 
         Console.WriteLine();
         if (d.Tasks.Count == 0)

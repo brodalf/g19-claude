@@ -2,6 +2,16 @@ namespace G19Claude;
 
 public sealed record ModelSlice(string Display, long Tokens, double Cost);
 
+/// <summary>One row of the session overview: which Claude is busy and which is waiting on you.</summary>
+public sealed record SessionRow(
+    string SessionId,
+    string Project,
+    bool IsWorking,
+    TimeSpan Idle,
+    double ContextFraction,
+    int ErrorCount,
+    bool IsActive);
+
 /// <summary>
 /// Everything the three pages need, aggregated once per poll rather than per frame.
 /// </summary>
@@ -67,6 +77,17 @@ public sealed record Dashboard
     /// <summary>Claude Code's todo list for the active session, empty when it never used one.</summary>
     public IReadOnlyList<TaskItem> Tasks { get; init; } = Array.Empty<TaskItem>();
 
+    /// <summary>Every session seen recently, busiest state first. Empty when only one is running.</summary>
+    public IReadOnlyList<SessionRow> Sessions { get; init; } = Array.Empty<SessionRow>();
+
+    // Live state of the active session
+    public long ContextTokens { get; init; }
+    public long ContextWindow { get; init; } = 1_000_000;
+    public double ContextFraction { get; init; }
+    public string CurrentTool { get; init; } = "";
+    public string CurrentToolDetail { get; init; } = "";
+    public int ErrorCount { get; init; }
+
     // Today
     public long TodayTokens { get; init; }
     public double TodayCost { get; init; }
@@ -78,13 +99,15 @@ public sealed record Dashboard
         IReadOnlyList<TurnMarker> markers,
         string activeSessionId,
         AppConfig config,
-        IReadOnlyList<TaskItem> tasks)
+        IReadOnlyList<TaskItem> tasks,
+        IReadOnlyList<SessionInfo> sessions)
     {
         if (entries.Count == 0) return Empty;
 
         var now = DateTimeOffset.UtcNow;
         var session = entries.Where(e => e.SessionId == activeSessionId).ToList();
         var turn = ResolveTurn(session, markers, activeSessionId);
+        var live = sessions.FirstOrDefault(s => s.SessionId == activeSessionId);
 
         // "Today" follows the user's local calendar day, not UTC - the display sits on their desk.
         var midnight = new DateTimeOffset(DateTime.Today, DateTimeOffset.Now.Offset).ToUniversalTime();
@@ -129,6 +152,14 @@ public sealed record Dashboard
             BlockStart = block?.Start ?? default,
 
             Tasks = tasks,
+            Sessions = BuildSessionRows(sessions, markers, activeSessionId),
+
+            ContextTokens = live?.ContextTokens ?? 0,
+            ContextWindow = live?.ContextWindow ?? 1_000_000,
+            ContextFraction = live?.ContextFraction ?? 0,
+            CurrentTool = live?.LastTool ?? "",
+            CurrentToolDetail = live?.LastToolDetail ?? "",
+            ErrorCount = live?.ErrorCount ?? 0,
 
             WeeklyTokens = weekTokens,
             WeeklyCost = week.Sum(Pricing.Cost),
@@ -153,6 +184,37 @@ public sealed record Dashboard
             TodayMessages = today.Count,
             TodayByModel = byModel,
         };
+    }
+
+    /// <summary>
+    /// One row per session seen in the last twelve hours, working ones first, then the ones
+    /// that have been waiting on you longest. Older sessions are dropped - with a dozen Claude
+    /// processes around, a list of everything ever run is noise.
+    /// </summary>
+    private static List<SessionRow> BuildSessionRows(
+        IReadOnlyList<SessionInfo> sessions, IReadOnlyList<TurnMarker> markers, string activeSessionId)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddHours(-12);
+        var now = DateTimeOffset.UtcNow;
+
+        var stateBySession = markers
+            .GroupBy(m => m.SessionId)
+            .ToDictionary(g => g.Key, g => !g.OrderBy(m => m.Timestamp).Last().IsEndTurn);
+
+        return sessions
+            .Where(s => s.LastActivity >= cutoff)
+            .Select(s => new SessionRow(
+                SessionId: s.SessionId,
+                Project: string.IsNullOrEmpty(s.Project) ? "?" : s.Project,
+                IsWorking: stateBySession.GetValueOrDefault(s.SessionId, false),
+                Idle: now - s.LastActivity,
+                ContextFraction: s.ContextFraction,
+                ErrorCount: s.ErrorCount,
+                IsActive: s.SessionId == activeSessionId))
+            .OrderByDescending(r => r.IsWorking)
+            .ThenByDescending(r => r.IsActive)
+            .ThenBy(r => r.Idle)
+            .ToList();
     }
 
     private sealed record TurnState(
