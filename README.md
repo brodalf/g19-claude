@@ -35,8 +35,46 @@ Die Aufschlüsselung ist der Punkt: Cache-Lesevorgänge machen in einer langen S
 über 90 % der Tokens aus und kosten fast nichts. Eine reine Gesamtzahl würde das
 verschleiern.
 
-**2 — 5-Stunden-Fenster** — Verbrauch im laufenden Fenster, optional gegen ein selbst
-gesetztes Budget als Balken, dazu Startzeit und Countdown bis zum Reset.
+**2 — Limits** — zwei Anzeigen in Prozent, das 5-Stunden-Fenster mit Reset-Countdown
+und die rollierenden 7 Tage:
+
+```
++------------------------------------------+
+|  * CLAUDE                    ARBEITET 0:12 |
+|  ---------------------------------------- |
+|  5 STUNDEN                     Reset 3:19 |
+|  80%                       28.1M / 35.1M  |
+|  ========================------------      |
+|  ---------------------------------------- |
+|  7 TAGE                      353 Anfragen |
+|  80%                       94.0M / 117.5M |
+|  ========================------------      |
+|                                           |
+|   $18.75 im Fenster  -  $87.48 in 7 Tagen |
++------------------------------------------+
+```
+
+Die Prozentzahl wechselt ab 70 % auf Gelb und ab 90 % auf Rot.
+
+### Worauf sich die Prozente beziehen
+
+**Nicht auf Anthropics Kontingent** — das liegt nirgends lokal vor (siehe unten).
+Bezugsgröße ist ein Budget in der `config.json`, und damit es von Anfang an sinnvoll
+ist, leitet `--calibrate` es aus deinem eigenen Verlauf ab:
+
+```powershell
+G19Claude.exe --calibrate
+```
+
+Gesetzt werden dein **größtes bisheriges 5-Stunden-Fenster plus 25 %** und dein
+**7-Tage-Verbrauch plus 25 %**. Die Reserve ist wichtig: ohne sie stünde die Anzeige
+im Moment der Kalibrierung zwangsläufig auf 100 % und wäre wertlos. Mit ihr liest sich
+eine intensive Phase als etwa 80 %, und Gelb bzw. Rot erscheinen erst jenseits deines
+eigenen Rekords.
+
+Liegen weniger als sieben Tage Verlauf vor, sagt `--calibrate` das ausdrücklich — der
+Wochenwert ist dann noch keine volle Woche. Nach ein paar Tagen einfach erneut laufen
+lassen. Beide Werte lassen sich jederzeit von Hand in der `config.json` überschreiben.
 
 **3 — Heute** — Tagessumme und Aufschlüsselung nach Modell.
 

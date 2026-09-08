@@ -25,8 +25,15 @@ public enum PauseMode
 
 public sealed class AppConfig
 {
-    /// <summary>Token budget for one five-hour window. Zero hides the budget bar.</summary>
+    /// <summary>
+    /// Reference token budget for one five-hour window. Zero means no percentage can be shown.
+    /// This is your own number - Anthropic's actual quota is not readable locally - and
+    /// --calibrate fills it from your observed high-water mark.
+    /// </summary>
     public long BlockBudgetTokens { get; set; }
+
+    /// <summary>Reference budget for the rolling seven-day window.</summary>
+    public long WeeklyBudgetTokens { get; set; }
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public PauseMode PauseMode { get; set; } = PauseMode.Interrupt;
@@ -34,8 +41,11 @@ public sealed class AppConfig
     /// <summary>Process name to act on, without the .exe suffix.</summary>
     public string ProcessName { get; set; } = "claude";
 
-    /// <summary>How far back to read transcripts. Two days is plenty for today plus the block.</summary>
-    public int HistoryDays { get; set; } = 2;
+    /// <summary>
+    /// How far back to read transcripts. Eight days so the rolling seven-day window is
+    /// complete, with a day of slack.
+    /// </summary>
+    public int HistoryDays { get; set; } = 8;
 
     /// <summary>Show the full-screen banner when Claude finishes a turn.</summary>
     public bool NotifyOnDone { get; set; } = true;

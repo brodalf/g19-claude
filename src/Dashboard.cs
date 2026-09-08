@@ -54,6 +54,16 @@ public sealed record Dashboard
 
     private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
 
+    // Rolling seven-day window. Claude's weekly limit resets on a fixed schedule that is not
+    // knowable locally, so this is a rolling sum rather than a calendar week.
+    public long WeeklyTokens { get; init; }
+    public double WeeklyCost { get; init; }
+    public int WeeklyMessages { get; init; }
+
+    /// <summary>Fraction of the reference budget, or null when no budget is configured.</summary>
+    public double? BlockFraction { get; init; }
+    public double? WeeklyFraction { get; init; }
+
     // Today
     public long TodayTokens { get; init; }
     public double TodayCost { get; init; }
@@ -63,7 +73,8 @@ public sealed record Dashboard
     public static Dashboard Build(
         IReadOnlyList<UsageEntry> entries,
         IReadOnlyList<TurnMarker> markers,
-        string activeSessionId)
+        string activeSessionId,
+        AppConfig config)
     {
         if (entries.Count == 0) return Empty;
 
@@ -77,6 +88,11 @@ public sealed record Dashboard
 
         var blocks = UsageStore.BuildBlocks(entries);
         var block = blocks.LastOrDefault(b => b.IsActive(now));
+
+        var weekStart = now.AddDays(-7);
+        var week = entries.Where(e => e.Timestamp >= weekStart).ToList();
+        var weekTokens = week.Sum(e => e.TotalTokens);
+        var blockTokens = block?.TotalTokens ?? 0;
 
         var byModel = today
             .GroupBy(e => Pricing.Display(e.Model))
@@ -107,6 +123,17 @@ public sealed record Dashboard
             BlockMessages = block?.Entries.Count ?? 0,
             BlockRemaining = block?.Remaining(now) ?? TimeSpan.Zero,
             BlockStart = block?.Start ?? default,
+
+            WeeklyTokens = weekTokens,
+            WeeklyCost = week.Sum(Pricing.Cost),
+            WeeklyMessages = week.Count,
+
+            BlockFraction = config.BlockBudgetTokens > 0
+                ? blockTokens / (double)config.BlockBudgetTokens
+                : null,
+            WeeklyFraction = config.WeeklyBudgetTokens > 0
+                ? weekTokens / (double)config.WeeklyBudgetTokens
+                : null,
 
             IsWorking = turn.IsWorking,
             DoneAt = turn.DoneAt,

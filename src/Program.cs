@@ -30,9 +30,15 @@ internal static class Program
             return 4;
         }
 
+        if (args.Contains("--calibrate"))
+        {
+            Calibrate(store, config);
+            return 0;
+        }
+
         if (args.Contains("--dump"))
         {
-            DumpOnce(store);
+            DumpOnce(store, config);
             return 0;
         }
 
@@ -64,7 +70,7 @@ internal static class Program
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
-        var poller = Task.Run(() => PollLoop(store, cts.Token), cts.Token);
+        var poller = Task.Run(() => PollLoop(store, config, cts.Token), cts.Token);
 
         Console.WriteLine("Laeuft. Tasten am Display: links/rechts = Seite, OK = Pause.");
         Console.WriteLine("Seiten: 1 Session, 2 5-Stunden-Fenster, 3 Heute.");
@@ -91,14 +97,14 @@ internal static class Program
         return 0;
     }
 
-    private static void PollLoop(UsageStore store, CancellationToken ct)
+    private static void PollLoop(UsageStore store, AppConfig config, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 store.Refresh();
-                _dashboard = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId);
+                _dashboard = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId, config);
             }
             catch (Exception ex)
             {
@@ -214,11 +220,86 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// Derives reference budgets from what this machine has actually consumed.
+    ///
+    /// Anthropic's real quota is not readable locally, so a percentage needs some denominator.
+    /// The busiest five-hour window on record is the most defensible one available: at 100%
+    /// you are back at your own high-water mark. It is a personal yardstick, not the account
+    /// limit, and the README says so plainly.
+    /// </summary>
+    private static void Calibrate(UsageStore store, AppConfig config)
+    {
+        // A config written before the weekly gauge existed can still say 2 days, which would
+        // silently truncate the seven-day window. Calibration is the right moment to fix it.
+        if (config.HistoryDays < 8)
+        {
+            Console.WriteLine($"historyDays {config.HistoryDays} -> 8 (fuer das 7-Tage-Fenster noetig)");
+            config.HistoryDays = 8;
+            config.Save();
+            store = new UsageStore(config.HistoryDays);
+        }
+
+        Console.WriteLine("Lese Verlauf ...");
+        store.Refresh();
+
+        var entries = store.Snapshot();
+        if (entries.Count == 0)
+        {
+            Console.WriteLine("Keine Nutzungsdaten gefunden - nichts zu kalibrieren.");
+            return;
+        }
+
+        // Headroom matters. Setting the budget to the observed peak puts you at 100% the moment
+        // you calibrate, which tells you nothing. A quarter above the peak means a heavy stretch
+        // reads around 80% and the warning colours only appear past your own record.
+        const double headroom = 1.25;
+
+        var blocks = UsageStore.BuildBlocks(entries);
+        var busiest = blocks.Max(b => b.TotalTokens);
+        var first = entries.Min(e => e.Timestamp);
+        var span = DateTimeOffset.UtcNow - first;
+
+        var weekStart = DateTimeOffset.UtcNow.AddDays(-7);
+        var weekly = entries.Where(e => e.Timestamp >= weekStart).Sum(e => e.TotalTokens);
+
+        config.BlockBudgetTokens = RoundUp((long)(busiest * headroom));
+        config.WeeklyBudgetTokens = RoundUp((long)(weekly * headroom));
+        config.Save();
+
+        Console.WriteLine($"Verlauf ab       : {first.ToLocalTime():dd.MM. HH:mm}  ({entries.Count:N0} Anfragen, {blocks.Count} Fenster)");
+        Console.WriteLine($"Groesstes Fenster: {busiest:N0} Tokens");
+        Console.WriteLine($"Letzte 7 Tage    : {weekly:N0} Tokens");
+        Console.WriteLine();
+        Console.WriteLine($"Gesetzt: blockBudgetTokens  = {config.BlockBudgetTokens:N0}  (Spitze + 25 %)");
+        Console.WriteLine($"Gesetzt: weeklyBudgetTokens = {config.WeeklyBudgetTokens:N0}  (7 Tage + 25 %)");
+        Console.WriteLine($"in {AppConfig.Path}");
+        Console.WriteLine();
+
+        if (span < TimeSpan.FromDays(7))
+        {
+            Console.WriteLine($"ACHTUNG: Es liegen erst {span.TotalDays:0.0} Tage Verlauf vor. Der Wochenwert ist");
+            Console.WriteLine("noch keine volle Woche - nach ein paar Tagen erneut kalibrieren.");
+            Console.WriteLine();
+        }
+
+        Console.WriteLine("Das sind deine eigenen Verbrauchswerte, nicht Anthropics Limit.");
+        Console.WriteLine("Werte in der config.json jederzeit von Hand anpassbar.");
+    }
+
+    /// <summary>Rounds up to a readable step so the budget does not look spuriously precise.</summary>
+    private static long RoundUp(long value) => value switch
+    {
+        >= 1_000_000 => (long)Math.Ceiling(value / 100_000.0) * 100_000,
+        >= 100_000 => (long)Math.Ceiling(value / 10_000.0) * 10_000,
+        _ => (long)Math.Ceiling(value / 1_000.0) * 1_000,
+    };
+
     /// <summary>Prints the aggregate to the console once - useful without a G19 attached.</summary>
-    private static void DumpOnce(UsageStore store)
+    private static void DumpOnce(UsageStore store, AppConfig config)
     {
         store.Refresh();
-        var d = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId);
+        var d = Dashboard.Build(store.Snapshot(), store.MarkerSnapshot(), store.ActiveSessionId, config);
 
         if (!d.HasData)
         {
@@ -244,14 +325,21 @@ internal static class Program
         {
             Console.WriteLine($"  Start        : {d.BlockStart.ToLocalTime():HH:mm}");
             Console.WriteLine($"  Reset in     : {(int)d.BlockRemaining.TotalHours}:{d.BlockRemaining.Minutes:00}");
-            Console.WriteLine($"  Tokens       : {d.BlockTokens:N0}");
+            Console.WriteLine($"  Tokens       : {d.BlockTokens:N0}{Percent(d.BlockFraction, config.BlockBudgetTokens)}");
             Console.WriteLine($"  API-Aequiv.  : ${d.BlockCost:0.00}");
         }
+        Console.WriteLine();
+        Console.WriteLine($"7 Tage rollierend: {d.WeeklyTokens:N0} Tokens{Percent(d.WeeklyFraction, config.WeeklyBudgetTokens)}");
+        Console.WriteLine($"  Anfragen     : {d.WeeklyMessages:N0}");
+        Console.WriteLine($"  API-Aequiv.  : ${d.WeeklyCost:0.00}");
         Console.WriteLine();
         Console.WriteLine($"Heute: {d.TodayTokens:N0} Tokens, {d.TodayMessages:N0} Anfragen, ${d.TodayCost:0.00}");
         foreach (var slice in d.TodayByModel)
             Console.WriteLine($"  {slice.Display,-12} {slice.Tokens,14:N0}  ${slice.Cost:0.00}");
     }
+
+    private static string Percent(double? fraction, long budget) =>
+        fraction is null ? "  (kein Budget gesetzt)" : $"  = {fraction.Value * 100:0}% von {budget:N0}";
 
     private static Page Next(Page page, int delta) =>
         (Page)(((int)page + delta + LcdRenderer.PageCount) % LcdRenderer.PageCount);
@@ -280,16 +368,21 @@ internal static class Program
         Console.WriteLine("""
             G19Claude - zeigt den Claude-Token-Verbrauch auf dem Logitech G19 LCD.
 
-              G19Claude.exe [--dump]
+              G19Claude.exe [--dump] [--calibrate]
 
-              --dump    Werte einmal auf der Konsole ausgeben und beenden
-                        (funktioniert ohne angeschlossenen G19)
-              --help    Diese Hilfe
+              --dump      Werte einmal auf der Konsole ausgeben und beenden
+                          (funktioniert ohne angeschlossenen G19)
+              --calibrate Referenzbudgets aus dem eigenen Verlauf setzen und beenden
+              --help      Diese Hilfe
 
             Seiten (Tasten links/rechts unter dem Display):
               1  Session    Tokens der laufenden Session, aufgeschluesselt
-              2  Fenster    Verbrauch im laufenden 5-Stunden-Fenster
+              2  Limits     5-Stunden-Fenster und 7 Tage, jeweils in Prozent
               3  Heute      Tagessumme, aufgeschluesselt nach Modell
+
+            Die Prozentwerte beziehen sich auf Budgets in der config.json, nicht auf
+            Anthropics Kontingent - das liegt nirgends lokal vor. --calibrate setzt sie
+            auf die eigenen Hoechstwerte.
 
             OK-Taste: je nach pauseMode in config.json
               interrupt  Escape an das Claude-Fenster - beendet den laufenden Turn (Standard)

@@ -34,6 +34,7 @@ public sealed class LcdRenderer : IDisposable
     private readonly Font _fontSmallBold = new("Segoe UI", 11f, FontStyle.Bold, GraphicsUnit.Pixel);
     private readonly Font _fontBody = new("Segoe UI", 13f, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly Font _fontBodyBold = new("Segoe UI", 13f, FontStyle.Bold, GraphicsUnit.Pixel);
+    private readonly Font _fontBig = new("Segoe UI", 30f, FontStyle.Bold, GraphicsUnit.Pixel);
     private readonly Font _fontHuge = new("Segoe UI", 34f, FontStyle.Bold, GraphicsUnit.Pixel);
     private readonly StringFormat _sf = new(StringFormat.GenericTypographic) { FormatFlags = StringFormatFlags.NoWrap };
 
@@ -203,46 +204,82 @@ public sealed class LcdRenderer : IDisposable
 
     // -- page 2: five-hour block --------------------------------------------
 
+    /// <summary>
+    /// Two gauges: the five-hour window and the rolling seven days, each as a percentage of a
+    /// reference budget. The percentages are only as meaningful as those budgets - see the
+    /// README on why the real quota cannot be read locally.
+    /// </summary>
     private void DrawBlock(Dashboard d, AppConfig config)
+    {
+        using var tertiary = new SolidBrush(TextTertiary);
+        using var secondary = new SolidBrush(TextSecondary);
+
+        var reset = d.HasBlock
+            ? $"Reset {(int)d.BlockRemaining.TotalHours}:{d.BlockRemaining.Minutes:00}"
+            : "kein Fenster";
+
+        DrawGauge(
+            y: 40,
+            label: "5 STUNDEN",
+            note: reset,
+            fraction: d.BlockFraction,
+            used: d.BlockTokens,
+            budget: config.BlockBudgetTokens);
+
+        using var divider = new Pen(Divider);
+        _g.DrawLine(divider, 16, 122, W - 16, 122);
+
+        DrawGauge(
+            y: 130,
+            label: "7 TAGE",
+            note: $"{d.WeeklyMessages:N0} Anfragen",
+            fraction: d.WeeklyFraction,
+            used: d.WeeklyTokens,
+            budget: config.WeeklyBudgetTokens);
+
+        if (d.BlockFraction is null || d.WeeklyFraction is null)
+            Centered("Budget setzen:  G19Claude.exe --calibrate", _fontSmall, tertiary, 210);
+        else
+            Centered($"{Money(d.BlockCost)} im Fenster  -  {Money(d.WeeklyCost)} in 7 Tagen",
+                _fontSmall, secondary, 210);
+    }
+
+    private void DrawGauge(int y, string label, string note, double? fraction, long used, long budget)
     {
         using var primary = new SolidBrush(TextPrimary);
         using var secondary = new SolidBrush(TextSecondary);
         using var tertiary = new SolidBrush(TextTertiary);
-        using var accent = new SolidBrush(Accent);
 
-        _g.DrawString("5-STUNDEN-FENSTER", _fontSmallBold, tertiary, 16, 40, _sf);
+        _g.DrawString(label, _fontSmallBold, tertiary, 16, y, _sf);
+        _g.DrawString(note, _fontSmall, tertiary, W - 16 - Measure(note, _fontSmall), y, _sf);
 
-        if (!d.HasBlock)
+        if (fraction is null)
         {
-            Centered("Kein aktives Fenster", _fontBody, secondary, 110);
+            _g.DrawString(Tokens(used), _fontBig, primary, 16, y + 14, _sf);
+            _g.DrawString("kein Budget", _fontSmall, tertiary,
+                W - 16 - Measure("kein Budget", _fontSmall), y + 30, _sf);
+            DrawBar(16, y + 54, W - 32, 8, 0);
             return;
         }
 
-        Centered(Tokens(d.BlockTokens), _fontHuge, primary, 56);
+        var value = fraction.Value;
+        var percent = $"{value * 100:0}%";
 
-        var budget = config.BlockBudgetTokens;
-        if (budget > 0)
+        // The percentage is the headline; the raw counts stay available but secondary.
+        using var percentBrush = new SolidBrush(value switch
         {
-            var fraction = Math.Clamp(d.BlockTokens / (double)budget, 0, 1);
-            Centered($"{fraction * 100:0}% von {Tokens(budget)}", _fontSmall, tertiary, 100);
-            DrawBar(16, 122, W - 32, 8, fraction);
-        }
-        else
-        {
-            Centered("kein Budget gesetzt (config.json)", _fontSmall, tertiary, 100);
-        }
+            >= 0.9 => Danger,
+            >= 0.7 => Warn,
+            _ => TextPrimary,
+        });
 
-        using var divider = new Pen(Divider);
-        _g.DrawLine(divider, 16, 146, W - 16, 146);
+        _g.DrawString(percent, _fontBig, percentBrush, 16, y + 14, _sf);
 
-        Row(156, "Anfragen", d.BlockMessages.ToString("N0"), secondary, primary);
-        Row(176, "Fenster startete", d.BlockStart.ToLocalTime().ToString("HH:mm"), secondary, primary);
+        var counts = $"{Tokens(used)} / {Tokens(budget)}";
+        _g.DrawString(counts, _fontSmall, secondary, W - 16 - Measure(counts, _fontSmall), y + 32, _sf);
 
-        var remaining = d.BlockRemaining;
-        Row(196, "Reset in", $"{(int)remaining.TotalHours}:{remaining.Minutes:00}", secondary, primary);
-
-        var cost = Money(d.BlockCost);
-        _g.DrawString(cost, _fontSmallBold, accent, W - 16 - Measure(cost, _fontSmallBold), 212, _sf);
+        // Over budget still draws a full bar - the percentage above carries the overshoot.
+        DrawBar(16, y + 54, W - 32, 8, Math.Clamp(value, 0, 1));
     }
 
     private void DrawBar(int x, int y, int width, int height, double fraction)
@@ -356,6 +393,7 @@ public sealed class LcdRenderer : IDisposable
         _fontSmallBold.Dispose();
         _fontBody.Dispose();
         _fontBodyBold.Dispose();
+        _fontBig.Dispose();
         _fontHuge.Dispose();
         _g.Dispose();
         _canvas.Dispose();
