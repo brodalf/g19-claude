@@ -52,7 +52,7 @@ internal static class Program
             return 2;
         }
 
-        if (!LogitechLcd.LogiLcdInit("Claude", LogitechLcd.TypeColor))
+        if (!LogitechLcd.Connect("Claude"))
         {
             Console.Error.WriteLine("LogiLcdInit fehlgeschlagen. Laeuft die Logitech Gaming Software (LCore.exe)?");
             return 3;
@@ -127,6 +127,7 @@ internal static class Program
         var buttons = new ButtonReader();
         var page = Page.Session;
         var warnedDisconnected = false;
+        var disconnectedSince = DateTime.UtcNow;
         var lastAction = "";
 
         // The first observed state must not count as a transition, or starting the applet
@@ -145,6 +146,16 @@ internal static class Program
                 {
                     Console.WriteLine("Warte auf das G19-Display ...");
                     warnedDisconnected = true;
+                    disconnectedSince = DateTime.UtcNow;
+                }
+
+                // A registration that never took, or an LGS restart underneath us, stays
+                // disconnected for good unless we register again.
+                if (DateTime.UtcNow - disconnectedSince > TimeSpan.FromSeconds(15))
+                {
+                    Console.WriteLine("Registriere neu bei LGS ...");
+                    LogitechLcd.Reconnect("Claude");
+                    disconnectedSince = DateTime.UtcNow;
                 }
 
                 Sleep(TimeSpan.FromSeconds(1), ct);

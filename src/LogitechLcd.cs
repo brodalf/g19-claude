@@ -32,6 +32,65 @@ internal static class LogitechLcd
     private const string Dll = "LogitechLcd.dll";
 
     /// <summary>
+    /// Waits until LGS has been up long enough to take LCD clients, then registers, retrying
+    /// if LogiLcdInit refuses.
+    ///
+    /// Launched from Autostart, the applets come up a few seconds after LCore.exe. After a
+    /// reboot on 2026-09-22 all three started 6 s after LCore, kept running, and never
+    /// appeared on the display; restarting them minutes later worked immediately. Waiting for
+    /// LGS to settle removes that race.
+    /// </summary>
+    public static bool Connect(string name)
+    {
+        WaitForLgs(settle: TimeSpan.FromSeconds(20), maxWait: TimeSpan.FromMinutes(3));
+
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            if (LogiLcdInit(name, TypeColor)) return true;
+            Thread.Sleep(3000);
+        }
+
+        return false;
+    }
+
+    /// <summary>Drops the registration and registers again - for when LGS lost us.</summary>
+    public static bool Reconnect(string name)
+    {
+        try { LogiLcdShutdown(); } catch { /* registration was already gone */ }
+        return LogiLcdInit(name, TypeColor);
+    }
+
+    private static void WaitForLgs(TimeSpan settle, TimeSpan maxWait)
+    {
+        var deadline = DateTime.UtcNow + maxWait;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            var lcore = System.Diagnostics.Process.GetProcessesByName("LCore");
+            try
+            {
+                if (lcore.Length > 0)
+                {
+                    var uptime = DateTime.Now - lcore[0].StartTime;
+                    if (uptime < settle) Thread.Sleep(settle - uptime);
+                    return;
+                }
+            }
+            catch
+            {
+                // StartTime unreadable - LGS is there, which is what matters.
+                return;
+            }
+            finally
+            {
+                foreach (var p in lcore) p.Dispose();
+            }
+
+            Thread.Sleep(2000);
+        }
+    }
+
+    /// <summary>
     /// Installs the shared native resolver and verifies the DLL is actually reachable, so a
     /// missing LGS install fails here with a useful message rather than at the first P/Invoke.
     /// </summary>
